@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'">
+  <title>Creaters Tool Engineer</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', sans-serif;
+      background: #0f0f1a;
+      color: #d0d0e0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    .header {
+      background: #1a1a30;
+      padding: 16px 20px;
+      border-bottom: 1px solid #2a2a45;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .header h1 { font-size: 1rem; font-weight: 600; color: #a0c8ff; }
+    .content { padding: 20px; flex: 1; display: flex; flex-direction: column; gap: 14px; }
+
+    .status-bar {
+      background: #1a1a30;
+      border: 1px solid #2a2a45;
+      border-radius: 8px;
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      transition: background 0.3s;
+    }
+    .dot.inactive { background: #555; }
+    .dot.pending  { background: #ffd54f; animation: blink 1s infinite; }
+    .dot.active   { background: #69f0ae; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+    .status-text { font-size: 0.9rem; }
+    .status-text strong { color: #fff; }
+
+    label { font-size: 0.8rem; color: #888; margin-bottom: 2px; display: block; }
+
+    select {
+      width: 100%;
+      padding: 10px 12px;
+      background: #1a1a30;
+      color: #d0d0e0;
+      border: 1px solid #3a3a55;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      outline: none;
+      cursor: pointer;
+    }
+    select:focus { border-color: #a0c8ff; }
+    select:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .btn {
+      width: 100%;
+      padding: 12px;
+      border: none;
+      border-radius: 6px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.2s, transform 0.1s;
+    }
+    .btn:active:not(:disabled) { transform: scale(0.98); }
+    .btn:disabled { opacity: 0.35; cursor: not-allowed; }
+    .btn-start { background: #4fc3f7; color: #000; }
+    .btn-stop  { background: #ef5350; color: #fff; }
+    .btn-refresh { background: #2a2a45; color: #a0c8ff; font-size: 0.8rem; padding: 8px; }
+
+    .hint {
+      font-size: 0.75rem;
+      color: #666;
+      text-align: center;
+    }
+
+    .webhook-bar {
+      display: none;
+      background: #0d1f12;
+      border: 1px solid #2a4a30;
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 0.72rem;
+      gap: 6px;
+      align-items: center;
+    }
+    .webhook-bar.visible { display: flex; }
+    .webhook-label { color: #4caf50; white-space: nowrap; font-weight: 600; }
+    .webhook-url {
+      flex: 1;
+      color: #a5d6a7;
+      font-family: 'Consolas', monospace;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .btn-copy {
+      background: #1a3a20;
+      color: #4caf50;
+      border: 1px solid #2a4a30;
+      border-radius: 4px;
+      padding: 3px 8px;
+      font-size: 0.7rem;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .btn-copy:active { opacity: 0.7; }
+
+    .log-container { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+    .log {
+      flex: 1;
+      background: #0a0a14;
+      border: 1px solid #2a2a45;
+      border-radius: 6px;
+      padding: 10px;
+      overflow-y: auto;
+      font-size: 0.75rem;
+      font-family: 'Consolas', monospace;
+      color: #888;
+      min-height: 120px;
+      max-height: 180px;
+    }
+    .log-line { line-height: 1.5; white-space: pre-wrap; word-break: break-all; }
+    .log-line.err { color: #ef9a9a; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <span style="font-size:1.4rem">🤖</span>
+    <h1>Creaters Tool Engineer</h1>
+  </div>
+
+  <div class="content">
+    <div class="status-bar">
+      <div class="dot inactive" id="statusDot"></div>
+      <div class="status-text" id="statusText"><strong>停止中</strong></div>
+    </div>
+
+    <div>
+      <label>対応LINEアカウント（過去にメッセージを送ったアカウント）</label>
+      <select id="userSelect">
+        <option value="">-- 読み込み中... --</option>
+      </select>
+    </div>
+
+    <button class="btn btn-start" id="btnStart" disabled>認証して起動</button>
+    <button class="btn btn-stop"  id="btnStop"  style="display:none">セッションを停止する</button>
+    <button class="btn btn-refresh" id="btnRefresh">アカウント一覧を更新</button>
+
+    <p class="hint">認証後、LINEで「今日は終わってください」を送信するか<br>上の停止ボタンでセッションを終了できます。</p>
+
+    <div class="webhook-bar" id="webhookBar">
+      <span class="webhook-label">Webhook</span>
+      <span class="webhook-url" id="webhookUrl"></span>
+      <button type="button" class="btn-copy" id="btnCopyWebhook">コピー</button>
+    </div>
+
+    <div class="log-container">
+      <label>ログ</label>
+      <div class="log" id="log"></div>
+    </div>
+  </div>
+
+  <script>
+    const api = window.electronAPI;
+    const statusDot     = document.getElementById('statusDot');
+    const statusText    = document.getElementById('statusText');
+    const userSelect    = document.getElementById('userSelect');
+    const btnStart      = document.getElementById('btnStart');
+    const btnStop       = document.getElementById('btnStop');
+    const btnRefresh    = document.getElementById('btnRefresh');
+    const logEl         = document.getElementById('log');
+    const webhookBar    = document.getElementById('webhookBar');
+    const webhookUrlEl  = document.getElementById('webhookUrl');
+    const btnCopyWebhook = document.getElementById('btnCopyWebhook');
+
+    function addLog(msg) {
+      const line = document.createElement('div');
+      line.className = 'log-line' + (msg.includes('[ERR]') || msg.includes('[ERROR]') ? ' err' : '');
+      const now = new Date().toLocaleTimeString('ja-JP');
+      line.textContent = `[${now}] ${msg}`;
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    api.onLog((msg) => addLog(msg));
+
+    function applyServerInfo(info) {
+      if (info && info.webhookUrl) {
+        webhookUrlEl.textContent = info.webhookUrl;
+        webhookBar.classList.add('visible');
+      }
+    }
+
+    api.onServerInfo((info) => applyServerInfo(info));
+
+    btnCopyWebhook.addEventListener('click', () => {
+      const url = webhookUrlEl.textContent;
+      if (url) {
+        navigator.clipboard.writeText(url).then(() => {
+          btnCopyWebhook.textContent = 'コピー済み';
+          setTimeout(() => { btnCopyWebhook.textContent = 'コピー'; }, 1500);
+        });
+      }
+    });
+
+    function applyStatus(status, selectedUserId) {
+      statusDot.className = 'dot ' + status.toLowerCase();
+      const labels = { INACTIVE: '停止中', PENDING_OTP: 'OTP認証待ち', ACTIVE: '稼働中' };
+      const userId = selectedUserId ? `（${selectedUserId.slice(-8)}...）` : '';
+      statusText.innerHTML = `<strong>${labels[status] || status}</strong> ${userId}`;
+
+      if (status === 'ACTIVE') {
+        btnStart.style.display = 'none';
+        btnStop.style.display  = 'block';
+        userSelect.disabled = true;
+      } else if (status === 'PENDING_OTP') {
+        btnStart.disabled = true;
+        btnStop.style.display  = 'none';
+        btnStart.style.display = 'block';
+        btnStart.textContent   = 'OTP送信済み（LINEを確認）';
+        userSelect.disabled = true;
+      } else {
+        btnStart.style.display = 'block';
+        btnStop.style.display  = 'none';
+        btnStart.disabled      = !userSelect.value;
+        btnStart.textContent   = '認証して起動';
+        userSelect.disabled    = false;
+      }
+    }
+
+    async function loadUsers() {
+      const data = await api.getUsers();
+      const users = data.users || [];
+      userSelect.innerHTML = users.length === 0
+        ? '<option value="">-- まだメッセージ履歴がありません --</option>'
+        : '<option value="">-- アカウントを選択 --</option>' +
+          users.map(u => `<option value="${u.userId}">${u.displayName || u.userId.slice(-12)} （${u.messageCount}件）</option>`).join('');
+      btnStart.disabled = !userSelect.value;
+    }
+
+    async function pollStatus() {
+      const data = await api.getStatus();
+      applyStatus(data.status || 'INACTIVE', data.selectedUserId);
+    }
+
+    userSelect.addEventListener('change', () => {
+      const status = statusDot.className.replace('dot ', '');
+      if (status === 'inactive') {
+        btnStart.disabled = !userSelect.value;
+      }
+    });
+
+    btnStart.addEventListener('click', async () => {
+      const userId = userSelect.value;
+      if (!userId) return;
+      btnStart.disabled = true;
+      addLog(`${userId} へ認証コードを送信中...`);
+      const result = await api.startSession(userId);
+      addLog(result.message || JSON.stringify(result));
+      await pollStatus();
+    });
+
+    btnStop.addEventListener('click', async () => {
+      btnStop.disabled = true;
+      addLog('セッションを停止中...');
+      const result = await api.stopSession();
+      addLog(result.message || JSON.stringify(result));
+      await pollStatus();
+      btnStop.disabled = false;
+    });
+
+    btnRefresh.addEventListener('click', async () => {
+      btnRefresh.disabled = true;
+      await loadUsers();
+      btnRefresh.disabled = false;
+    });
+
+    // Initial load
+    loadUsers();
+    pollStatus();
+    api.getServerInfo().then((info) => applyServerInfo(info));
+
+    // Poll every 3 seconds
+    setInterval(pollStatus, 3000);
+  </script>
+</body>
+</html>
