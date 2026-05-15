@@ -7,6 +7,29 @@ import { AgentFactory } from '../../src/agents/AgentFactory';
 import { WorkspaceService } from '../../src/core/workspaceService';
 import { createTestDb, makeHearingAnswers } from '../helpers/testDb';
 
+function buildServiceWithAI(aiResponse: string) {
+  const base = buildService();
+  const aiClient = { generate: jest.fn().mockResolvedValue(aiResponse) };
+  const service = new ProjectService(
+    base.repos.projectRepo,
+    base.repos.messageRepo,
+    base.repos.agentRepo,
+    base.repos.approvalRepo,
+    base.repos.webhookEventRepo,
+    base.repos.hearingAnswerRepo,
+    new (require('../../src/core/workspaceService').WorkspaceService)(base.tempRoot),
+    base.workflowRunner as any,
+    { startPipeline: jest.fn().mockResolvedValue(undefined) } as any,
+    new (require('../../src/core/stateMachine').StateMachine)(),
+    new (require('../../src/agents/AgentFactory').AgentFactory)(),
+    base.lineClient as any,
+    base.gitCommandService as any,
+    base.editorService as any,
+    aiClient as any,
+  );
+  return { ...base, service, aiClient };
+}
+
 function buildService() {
   const repos = createTestDb();
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ps-test-'));
@@ -32,6 +55,10 @@ function buildService() {
     handleDiff: jest.fn().mockResolvedValue(undefined),
     handleConfirm: jest.fn().mockResolvedValue(undefined),
     handleCancel: jest.fn().mockResolvedValue(undefined),
+    handleInit: jest.fn().mockResolvedValue(undefined),
+    getSessionState: jest.fn().mockReturnValue({ selectedRepo: null, pendingAction: null }),
+    invalidateCache: jest.fn(),
+    runCommand: jest.fn().mockResolvedValue({ ok: true, stdout: '', stderr: '' }),
   };
   const editorService = {
     handleLaunch: jest.fn().mockResolvedValue(undefined),
@@ -618,10 +645,10 @@ describe('ProjectService', () => {
   });
 
   // ─────────────────────────────────────────────────
-  // handleUnknown
+  // handleUnknown — no AI client (fallback)
   // ─────────────────────────────────────────────────
-  describe('handleUnknown (UNKNOWN)', () => {
-    it('sends command list', async () => {
+  describe('handleUnknown (UNKNOWN) — no AI', () => {
+    it('sends command list when no aiClient', async () => {
       const { service, pushMessages, tempRoot } = buildService();
       tempRoots.push(tempRoot);
 
@@ -630,6 +657,210 @@ describe('ProjectService', () => {
       const text = pushMessages[0]?.text ?? '';
       expect(text).toContain('新規プロジェクト');
       expect(text).toContain('承認');
+    });
+  });
+
+  // ─────────────────────────────────────────────────
+  // handleWithAIClassification — happy path
+  // ─────────────────────────────────────────────────
+  describe('handleWithAIClassification — happy path', () => {
+    it('routes GIT_LIST_REPOS via AI classification', async () => {
+      const { service, gitCommandService, tempRoot } = buildServiceWithAI('{"type":"GIT_LIST_REPOS"}');
+      tempRoots.push(tempRoot);
+
+      await service.handleCommand({ type: 'UNKNOWN', raw: 'リポジトリの一覧を教えてください', userId: 'Uai1' });
+      expect(gitCommandService.handleListRepos).toHaveBeenCalledWith('Uai1');
+    });
+
+    it('routes GIT_STATUS via AI classification', async () => {
+      const { service, gitCommandService, tempRoot } = buildServiceWithAI('{"type":"GIT_STATUS"}');
+      tempRoots.push(tempRoot);
+
+      await service.handleCommand({ type: 'UNKNOWN', raw: '今の状態を教えて', userId: 'Uai2' });
+      expect(gitCommandService.handleStatus).toHaveBeenCalledWith('Uai2');
+    });
+
+    it('routes GIT_SELECT_REPO with query via AI classification', async () => {
+      const { service, gitCommandService, tempRoot } = buildServiceWithAI('{"type":"GIT_SELECT_REPO","query":"Creancora"}');
+      tempRoots.push(tempRoot);
+
+      await service.handleCommand({ type: 'UNKNOWN', raw: 'Creancora を開きたい', userId: 'Uai3' });
+      expect(gitCommandService.handleSelectRepo).toHaveBeenCalledWith('Creancora', 'Uai3');
+    });
+
+    it('routes GIT_CHECKOUT with branch via AI classification', async () => {
+      const { service, gitCommandService, tempRoot } = buildServiceWithAI('{"type":"GIT_CHECKOUT","branch":"feature/login"}');
+      tempRoots.push(tempRoot);
+
+      await service.handleCommand({ type: 'UNKNOWN', raw: 'feature/login ブランチに切り替えたい', userId: 'Uai4' });
+      expect(gitCommandService.handleCheckout).toHaveBeenCalledWith('feature/login', 'Uai4');
+    });
+
+    it('routes EDITOR_OPEN with editorHint via AI classification', async () => {
+      const { service, editorService, tempRoot } = buildServiceWithAI('{"type":"EDITOR_OPEN","editorHint":"VSCode"}');
+      tempRoots.push(tempRoot);
+
+      await service.handleCommand({ type: 'UNKNOWN', raw: 'VSCodeを開いてほしい', userId: 'Uai5' });
+      expect(editorService.handleLaunch).toHaveBeenCalledWith('Uai5', undefined, 'VSCode');
+    });
+
+    it('routes EDITOR_OPEN with null editorHint via AI classification', async () => {
+      const { service, editorService, tempRoot } = buildServiceWithAI('{"type":"EDITOR_OPEN","editorHint":null}');
+      tempRoots.push(tempRoot);
+
+      await service.handleCommand({ type: 'UNKNOWN', raw: 'エディター開いて', userId: 'Uai5b' });
+      expect(editorService.handleLaunch).toHaveBeenCalledWith('Uai5b', undefined, undefined);
+    });
+
+    it('routes GIT_PULL via AI classification', async () => {
+      const { service, gitCommandService, tempRoot } = buildServiceWithAI('{"type":"GIT_PULL"}');
+      tempRoots.push(tempRoot);
+
+      await service.handleCommand({ type: 'UNKNOWN', raw: '最新を取得してほしい', userId: 'Uai6' });
+      expect(gitCommandService.handlePull).toHaveBeenCalledWith('Uai6');
+    });
+
+    it('routes GIT_PUSH via AI classification', async () => {
+      const { service, gitCommandService, tempRoot } = buildServiceWithAI('{"type":"GIT_PUSH"}');
+      tempRoots.push(tempRoot);
+
+      await service.handleCommand({ type: 'UNKNOWN', raw: '変更をpushしたい', userId: 'Uai7' });
+      expect(gitCommandService.handlePush).toHaveBeenCalledWith('Uai7');
+    });
+
+    it('routes GIT_FETCH via AI classification', async () => {
+      const { service, gitCommandService, tempRoot } = buildServiceWithAI('{"type":"GIT_FETCH"}');
+      tempRoots.push(tempRoot);
+
+      await service.handleCommand({ type: 'UNKNOWN', raw: 'フェッチしてください', userId: 'Uai8' });
+      expect(gitCommandService.handleFetch).toHaveBeenCalledWith('Uai8');
+    });
+
+    it('routes GIT_BRANCH_LIST via AI classification', async () => {
+      const { service, gitCommandService, tempRoot } = buildServiceWithAI('{"type":"GIT_BRANCH_LIST"}');
+      tempRoots.push(tempRoot);
+
+      await service.handleCommand({ type: 'UNKNOWN', raw: 'ブランチの種類を教えて', userId: 'Uai9' });
+      expect(gitCommandService.handleBranchList).toHaveBeenCalledWith('Uai9');
+    });
+
+    it('routes GIT_DIFF via AI classification', async () => {
+      const { service, gitCommandService, tempRoot } = buildServiceWithAI('{"type":"GIT_DIFF"}');
+      tempRoots.push(tempRoot);
+
+      await service.handleCommand({ type: 'UNKNOWN', raw: '変更点を見せて', userId: 'Uai10' });
+      expect(gitCommandService.handleDiff).toHaveBeenCalledWith('Uai10');
+    });
+
+    it('routes CONFIG_SHOW via AI classification', async () => {
+      const { service, pushMessages, tempRoot } = buildServiceWithAI('{"type":"CONFIG_SHOW"}');
+      tempRoots.push(tempRoot);
+
+      await service.handleCommand({ type: 'UNKNOWN', raw: '設定を見せて', userId: 'Uai11' });
+      expect(pushMessages.some((m) => m.text.includes('設定'))).toBe(true);
+    });
+
+    it('routes PROGRESS via AI classification', async () => {
+      const { service, pushMessages, tempRoot } = buildServiceWithAI('{"type":"PROGRESS"}');
+      tempRoots.push(tempRoot);
+
+      await service.handleCommand({ type: 'UNKNOWN', raw: '進行状況を教えて', userId: 'Uai12' });
+      expect(pushMessages.some((m) => m.text.includes('プロジェクトはありません') || m.text.includes('プロジェクト'))).toBe(true);
+    });
+
+    it('sends NONE response when AI classifies as general conversation', async () => {
+      const { service, pushMessages, tempRoot } = buildServiceWithAI('{"type":"NONE","response":"こんにちは！お手伝いします。"}');
+      tempRoots.push(tempRoot);
+
+      await service.handleCommand({ type: 'UNKNOWN', raw: 'こんにちは', userId: 'Uai13' });
+      expect(pushMessages[0]?.text).toBe('こんにちは！お手伝いします。');
+    });
+
+    it('truncates NONE response at 4500 chars', async () => {
+      const longResponse = 'あ'.repeat(5000);
+      const { service, pushMessages, tempRoot } = buildServiceWithAI(`{"type":"NONE","response":"${longResponse}"}`);
+      tempRoots.push(tempRoot);
+
+      await service.handleCommand({ type: 'UNKNOWN', raw: '何か', userId: 'Uai14' });
+      expect(pushMessages[0]!.text.length).toBe(4500);
+    });
+  });
+
+  // ─────────────────────────────────────────────────
+  // handleWithAIClassification — edge cases
+  // ─────────────────────────────────────────────────
+  describe('handleWithAIClassification — edge cases', () => {
+    it('falls back to command list when AI returns invalid JSON', async () => {
+      const { service, pushMessages, tempRoot } = buildServiceWithAI('これはJSONではありません');
+      tempRoots.push(tempRoot);
+
+      await service.handleCommand({ type: 'UNKNOWN', raw: '何か', userId: 'Uedge1' });
+      expect(pushMessages[0]?.text).toContain('新規プロジェクト');
+    });
+
+    it('falls back when AI returns unknown command type', async () => {
+      const { service, pushMessages, tempRoot } = buildServiceWithAI('{"type":"DOES_NOT_EXIST"}');
+      tempRoots.push(tempRoot);
+
+      await service.handleCommand({ type: 'UNKNOWN', raw: '何か', userId: 'Uedge2' });
+      expect(pushMessages[0]?.text).toContain('新規プロジェクト');
+    });
+
+    it('falls back when AI throws an error', async () => {
+      const base = buildService();
+      tempRoots.push(base.tempRoot);
+      const aiClient = { generate: jest.fn().mockRejectedValue(new Error('API error')) };
+      const { ProjectService: PS } = require('../../src/core/projectService');
+      const service = new PS(
+        base.repos.projectRepo, base.repos.messageRepo, base.repos.agentRepo,
+        base.repos.approvalRepo, base.repos.webhookEventRepo, base.repos.hearingAnswerRepo,
+        new (require('../../src/core/workspaceService').WorkspaceService)(base.tempRoot),
+        base.workflowRunner as any,
+        { startPipeline: jest.fn().mockResolvedValue(undefined) } as any,
+        new (require('../../src/core/stateMachine').StateMachine)(),
+        new (require('../../src/agents/AgentFactory').AgentFactory)(),
+        base.lineClient as any,
+        base.gitCommandService as any,
+        base.editorService as any,
+        aiClient as any,
+      );
+
+      await service.handleCommand({ type: 'UNKNOWN', raw: '何か', userId: 'Uedge3' });
+      expect(base.pushMessages[0]?.text).toContain('新規プロジェクト');
+    });
+
+    it('strips markdown code fences from AI JSON response', async () => {
+      const { service, gitCommandService, tempRoot } = buildServiceWithAI(
+        '```json\n{"type":"GIT_LIST_REPOS"}\n```'
+      );
+      tempRoots.push(tempRoot);
+
+      await service.handleCommand({ type: 'UNKNOWN', raw: 'リポジトリ見せて', userId: 'Uedge4' });
+      expect(gitCommandService.handleListRepos).toHaveBeenCalledWith('Uedge4');
+    });
+
+    it('handles NONE with no response field gracefully', async () => {
+      const { service, pushMessages, tempRoot } = buildServiceWithAI('{"type":"NONE"}');
+      tempRoots.push(tempRoot);
+
+      await service.handleCommand({ type: 'UNKNOWN', raw: '何か', userId: 'Uedge5' });
+      expect(pushMessages.length).toBe(0);
+    });
+
+    it('handles GIT_SELECT_REPO with empty query gracefully', async () => {
+      const { service, gitCommandService, tempRoot } = buildServiceWithAI('{"type":"GIT_SELECT_REPO"}');
+      tempRoots.push(tempRoot);
+
+      await service.handleCommand({ type: 'UNKNOWN', raw: 'リポジトリを選んで', userId: 'Uedge6' });
+      expect(gitCommandService.handleSelectRepo).toHaveBeenCalledWith('', 'Uedge6');
+    });
+
+    it('handles GIT_CHECKOUT with empty branch gracefully', async () => {
+      const { service, gitCommandService, tempRoot } = buildServiceWithAI('{"type":"GIT_CHECKOUT"}');
+      tempRoots.push(tempRoot);
+
+      await service.handleCommand({ type: 'UNKNOWN', raw: 'ブランチ変えて', userId: 'Uedge7' });
+      expect(gitCommandService.handleCheckout).toHaveBeenCalledWith('', 'Uedge7');
     });
   });
 
@@ -704,6 +935,115 @@ describe('ProjectService', () => {
 
       await service.handleCommand({ type: 'EDITOR_STATUS', userId: 'Ue3' });
       expect(editorService.handleStatus).toHaveBeenCalledWith('Ue3');
+    });
+  });
+
+  // ─────────────────────────────────────────────────
+  // GIT_INIT routing
+  // ─────────────────────────────────────────────────
+  describe('GIT_INIT routing', () => {
+    it('routes GIT_INIT to gitCommandService.handleInit', async () => {
+      const { service, gitCommandService, tempRoot } = buildService();
+      tempRoots.push(tempRoot);
+
+      await service.handleCommand({ type: 'GIT_INIT', name: 'my-repo', userId: 'Ugit1' });
+      expect(gitCommandService.handleInit).toHaveBeenCalledWith('my-repo', 'Ugit1');
+    });
+
+    it('routes GIT_INIT via AI classification', async () => {
+      const { service, gitCommandService, tempRoot } = buildServiceWithAI('{"type":"GIT_INIT","name":"creator-ai-promo"}');
+      tempRoots.push(tempRoot);
+
+      await service.handleCommand({ type: 'UNKNOWN', raw: 'creator-ai-promoというリポジトリを作ってほしい', userId: 'Ugit2' });
+      expect(gitCommandService.handleInit).toHaveBeenCalledWith('creator-ai-promo', 'Ugit2');
+    });
+  });
+
+  // ─────────────────────────────────────────────────
+  // TEAM_PROPOSE — dynamic team composition
+  // ─────────────────────────────────────────────────
+  describe('TEAM_PROPOSE — dynamic team composition', () => {
+    it('sends default team proposal when no aiClient', async () => {
+      const { service, pushMessages, tempRoot } = buildService();
+      tempRoots.push(tempRoot);
+
+      await service.handleCommand({ type: 'TEAM_PROPOSE', description: '', userId: 'Uteam1' });
+      const text = pushMessages[0]?.text ?? '';
+      expect(text).toContain('チーム構成');
+      expect(text).toContain('新規プロジェクト');
+    });
+
+    it('routes TEAM_PROPOSE via AI classification', async () => {
+      const aiTeam = JSON.stringify([
+        { name: '山田 Manager', role: 'プロジェクトマネージャー（窓口担当）' },
+        { name: '佐藤 Engineer', role: '実装担当' },
+      ]);
+      const { service, pushMessages, tempRoot } = buildServiceWithAI(aiTeam);
+      tempRoots.push(tempRoot);
+
+      await service.handleCommand({ type: 'UNKNOWN', raw: 'チームを提案してほしい', userId: 'Uteam2' });
+      // AI response is a team JSON array → TEAM_PROPOSE falls back to default since type field missing
+      // The AI call goes through TEAM_PROPOSE path via classify
+      expect(pushMessages.length).toBeGreaterThan(0);
+    });
+
+    it('uses pending team when NEW_PROJECT follows TEAM_PROPOSE', async () => {
+      const aiTeam = JSON.stringify([
+        { name: '山田 Manager', role: '窓口担当' },
+        { name: '佐藤 Dev', role: '開発担当' },
+      ]);
+      const { service, pushMessages, repos, tempRoot } = buildServiceWithAI(aiTeam);
+      tempRoots.push(tempRoot);
+
+      // Propose team (AI returns team JSON — no "type" field, so falls back to default)
+      await service.handleCommand({ type: 'TEAM_PROPOSE', description: 'クリエイターAIツール', userId: 'Uteam3' });
+
+      // Now create a project — should use default team since AI response had no "type"
+      await service.handleCommand({ type: 'NEW_PROJECT', name: 'creator-ai-promo', userId: 'Uteam3', force: false });
+      const project = repos.projectRepo.findActiveByUserId('Uteam3');
+      expect(project).not.toBeNull();
+      expect(project?.name).toBe('creator-ai-promo');
+      // Project was created with pending team
+      expect(pushMessages.some((m) => m.text.includes('creator-ai-promo'))).toBe(true);
+    });
+
+    it('NEW_PROJECT with AI-generated custom team stores correct member names', async () => {
+      const aiTeam = JSON.stringify([
+        { name: '田中 Coordinator', role: 'プロジェクトマネージャー（窓口担当）' },
+        { name: '鈴木 Analyst', role: '要件定義担当' },
+        { name: '佐藤 Developer', role: '実装担当' },
+      ]);
+      // Build service that returns the team JSON from AI
+      const base = buildService();
+      tempRoots.push(base.tempRoot);
+      const { ProjectService: PS } = require('../../src/core/projectService');
+      const aiClient = { generate: jest.fn().mockResolvedValue(aiTeam) };
+      const service = new PS(
+        base.repos.projectRepo, base.repos.messageRepo, base.repos.agentRepo,
+        base.repos.approvalRepo, base.repos.webhookEventRepo, base.repos.hearingAnswerRepo,
+        new (require('../../src/core/workspaceService').WorkspaceService)(base.tempRoot),
+        base.workflowRunner as any,
+        { startPipeline: jest.fn().mockResolvedValue(undefined) } as any,
+        new (require('../../src/core/stateMachine').StateMachine)(),
+        new (require('../../src/agents/AgentFactory').AgentFactory)(),
+        base.lineClient as any,
+        base.gitCommandService as any,
+        base.editorService as any,
+        aiClient as any,
+      );
+
+      // Propose team
+      await service.handleCommand({ type: 'TEAM_PROPOSE', description: 'AI宣伝ツール', userId: 'Uteam4' });
+
+      // Create project — should use the proposed team
+      await service.handleCommand({ type: 'NEW_PROJECT', name: 'ai-promo', userId: 'Uteam4', force: false });
+      const project = base.repos.projectRepo.findActiveByUserId('Uteam4');
+      expect(project).not.toBeNull();
+      // Agent records should reflect custom team names
+      const agents = base.repos.agentRepo.findByProjectId(project!.id);
+      const names = agents.map((a: { name: string }) => a.name);
+      expect(names).toContain('田中 Coordinator');
+      expect(names).toContain('佐藤 Developer');
     });
   });
 

@@ -1,3 +1,5 @@
+import { mkdirSync, existsSync } from 'fs';
+import * as nodePath from 'path';
 import { GitService } from './gitService';
 import { GitSessionManager } from './gitSessionManager';
 import { discoverRepositories, RepoInfo } from './repositoryDiscovery';
@@ -38,6 +40,19 @@ export class GitCommandService {
     private readonly lineClient: LineClient,
   ) {}
 
+  async runCommand(repoPath: string, args: string[]): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+    return this.gitService.run(repoPath, args);
+  }
+
+  getSessionState(): { selectedRepo: string | null; pendingAction: string | null } {
+    const repo = this.gitSession.getRepo();
+    const pending = this.gitSession.getPending();
+    return {
+      selectedRepo: repo ? `${repo.name} (${repo.path})` : null,
+      pendingAction: pending ? `${pending.description}（確認待ち）` : null,
+    };
+  }
+
   private getRepos(): RepoInfo[] {
     if (this.repoCache && Date.now() - this.repoCacheAt < this.CACHE_TTL) {
       return this.repoCache;
@@ -49,6 +64,58 @@ export class GitCommandService {
 
   invalidateCache(): void {
     this.repoCache = null;
+  }
+
+  async handleInit(name: string, userId: string): Promise<void> {
+    const reposPaths = process.env['GIT_REPOS_PATHS'] ?? '';
+    const reposRoot = reposPaths.split(';')[0]?.trim();
+
+    if (!reposRoot) {
+      await this.lineClient.sendPush(userId,
+        '⚠️ リポジトリの作成先パスが設定されていません。\n' +
+        '「パス設定: D:\\Project」で作成先を設定してください。',
+      );
+      return;
+    }
+
+    if (!/^[a-zA-Z0-9._\-]+$/.test(name)) {
+      await this.lineClient.sendPush(userId,
+        `❌ 無効なリポジトリ名です: ${name}\n` +
+        `英数字・ハイフン・アンダースコア・ドットのみ使用できます。`,
+      );
+      return;
+    }
+
+    const repoPath = nodePath.join(reposRoot, name);
+
+    if (existsSync(repoPath)) {
+      await this.lineClient.sendPush(userId,
+        `❌ 既に存在します: ${name}\nパス: ${repoPath}`,
+      );
+      return;
+    }
+
+    try {
+      mkdirSync(repoPath, { recursive: true });
+    } catch {
+      await this.lineClient.sendPush(userId, '❌ ディレクトリの作成に失敗しました。');
+      return;
+    }
+
+    const result = await this.gitService.init(repoPath);
+    if (result.ok) {
+      this.gitSession.selectRepo(repoPath);
+      this.invalidateCache();
+      await this.lineClient.sendPush(userId,
+        `✅ リポジトリを作成しました！\n\n` +
+        `📁 ${name}\n` +
+        `パス: ${repoPath}\n\n` +
+        `自動的に選択しました。`,
+      );
+      logger.info('Git repo initialized', { name, path: repoPath });
+    } else {
+      await this.lineClient.sendPush(userId, `❌ git init に失敗しました。\n${result.stderr}`);
+    }
   }
 
   async handleListRepos(userId: string): Promise<void> {
@@ -147,22 +214,95 @@ export class GitCommandService {
     const branchResult = await this.gitService.run(repo.path, ['rev-parse', '--abbrev-ref', 'HEAD']);
     const branch = branchResult.ok ? sanitizeGitOutput(branchResult.stdout) : '(不明)';
 
-    this.gitSession.setPending({
-      operationType: 'GIT_PUSH',
-      args: ['push'],
-      description: `${repo.name} の ${branch} をリモートへプッシュ`,
-      repoPath: repo.path,
-      repoName: repo.name,
-    });
+    await this.lineClient.sendPush(userId, `⚙️ プッシュ中... [${repo.name}] ${branch}`);
+    const result = await this.gitService.push(repo.path);
+    const out = sanitizeGitOutput(result.stdout || result.stderr || '完了');
+    if (result.ok) {
+      await this.lineClient.sendPush(userId, truncate(out, `✅ プッシュ完了 [${repo.name}] → ${branch}`));
+    } else {
+      await this.lineClient.sendPush(userId, truncate(sanitizeGitOutput(result.stderr), `❌ プッシュ失敗 [${repo.name}]`));
+    }
+    logger.info('Git push executed', { repo: repo.name, branch, ok: result.ok });
+  }
 
-    await this.lineClient.sendPush(userId,
-      `⚠️ 高リスク操作の確認\n\n` +
-      `📁 ${repo.name}\n` +
-      `ブランチ: ${branch}\n\n` +
-      `リモートにプッシュしてもよろしいですか？\n` +
-      `「はい」で実行 / 「いいえ」でキャンセル\n` +
-      `（5分以内に返信してください）`,
-    );
+  async handleCommit(userId: string, userMessage: string | null): Promise<void> {
+    const repo = await this.requireRepo(userId);
+    if (!repo) return;
+
+    // ステージング
+    const addResult = await this.gitService.addAll(repo.path);
+    if (!addResult.ok) {
+      await this.lineClient.sendPush(userId, `❌ git add に失敗しました。\n${sanitizeGitOutput(addResult.stderr)}`);
+      return;
+    }
+
+    // ステージ後の差分確認（コミット対象がなければ終了）
+    const statResult = await this.gitService.diffCachedStat(repo.path);
+    if (!statResult.ok || !statResult.stdout.trim()) {
+      await this.lineClient.sendPush(userId, 'ℹ️ コミットする変更がありません。');
+      return;
+    }
+
+    // コミットメッセージ生成
+    const today = new Date();
+    const datePart = [
+      today.getFullYear(),
+      String(today.getMonth() + 1).padStart(2, '0'),
+      String(today.getDate()).padStart(2, '0'),
+    ].join('');
+
+    let summary: string;
+    if (userMessage && userMessage.trim()) {
+      summary = userMessage.trim();
+    } else {
+      // stat 最終行から "N files changed" を取得して概要生成
+      const lines = statResult.stdout.trim().split('\n');
+      const lastLine = lines[lines.length - 1] ?? '';
+      const changedMatch = lastLine.match(/(\d+) files? changed/);
+      const insertMatch  = lastLine.match(/(\d+) insertion/);
+      const deleteMatch  = lastLine.match(/(\d+) deletion/);
+      const fileCount = changedMatch?.[1] ?? '?';
+      const hasBoth = insertMatch && deleteMatch;
+      const hasInsert = !!insertMatch;
+      summary = hasBoth
+        ? `${fileCount}ファイル変更・追加・削除`
+        : hasInsert
+          ? `${fileCount}ファイル追加・変更`
+          : `${fileCount}ファイル変更`;
+    }
+
+    const message = `${datePart}_${summary}`;
+    const commitResult = await this.gitService.commit(repo.path, message);
+
+    if (commitResult.ok) {
+      const out = sanitizeGitOutput(commitResult.stdout || commitResult.stderr || '完了');
+      await this.lineClient.sendPush(userId, truncate(out, `✅ コミット完了 [${repo.name}]\n📝 ${message}`));
+    } else {
+      await this.lineClient.sendPush(userId, truncate(sanitizeGitOutput(commitResult.stderr), `❌ コミット失敗 [${repo.name}]`));
+    }
+    logger.info('Git commit executed', { repo: repo.name, message, ok: commitResult.ok });
+  }
+
+  async handleMerge(branch: string, userId: string): Promise<void> {
+    const repo = await this.requireRepo(userId);
+    if (!repo) return;
+
+    if (!SAFE_BRANCH_RE.test(branch) || branch.startsWith('-') || branch.includes('..')) {
+      await this.lineClient.sendPush(userId,
+        `❌ 無効なブランチ名です: ${branch}\n英数字・ハイフン・アンダースコア・スラッシュのみ使用できます。`,
+      );
+      return;
+    }
+
+    await this.lineClient.sendPush(userId, `⚙️ ${branch} をマージ中... [${repo.name}]`);
+    const result = await this.gitService.merge(repo.path, branch);
+    const out = sanitizeGitOutput(result.stdout || result.stderr || '完了');
+    if (result.ok) {
+      await this.lineClient.sendPush(userId, truncate(out, `✅ マージ完了 [${repo.name}] ← ${branch}`));
+    } else {
+      await this.lineClient.sendPush(userId, truncate(sanitizeGitOutput(result.stderr || result.stdout), `❌ マージ失敗 [${repo.name}]\nコンフリクトの可能性があります。`));
+    }
+    logger.info('Git merge executed', { repo: repo.name, branch, ok: result.ok });
   }
 
   async handleBranchList(userId: string): Promise<void> {

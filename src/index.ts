@@ -23,11 +23,18 @@ import { GitService } from './git/gitService';
 import { GitSessionManager } from './git/gitSessionManager';
 import { GitCommandService } from './git/gitCommandService';
 import { EditorService } from './editor/editorService';
-import { AddressInfo } from 'net';
+import { ClaudeCodeService } from './claude/claudeCodeService';
+import { checkWindowsUpdateStatus, isUpdateImminent, pauseWindowsUpdate, formatWuStatus } from './system/windowsUpdateService';
+import { AddressInfo, Server } from 'net';
 import { createServer } from './server';
 import { logger } from './utils/logger';
 
-async function main(): Promise<void> {
+export interface ServerHandle {
+  port: number;
+  close: () => Promise<void>;
+}
+
+export async function startServer(): Promise<ServerHandle> {
   const config = loadConfig();
   const db = getDatabase();
 
@@ -42,7 +49,6 @@ async function main(): Promise<void> {
   const hearingAnswerRepo = new HearingAnswerRepository(db);
   const sessionRepo       = new SessionRepository(db);
 
-  // Clean up stale OTP session from previous run
   sessionRepo.cleanupExpiredOtp();
 
   const workspaceService = new WorkspaceService();
@@ -72,38 +78,72 @@ async function main(): Promise<void> {
   const gitSession        = new GitSessionManager();
   const gitCommandService = new GitCommandService(gitService, gitSession, lineClient);
   const editorService     = new EditorService(lineClient);
+  const claudeCodeService = new ClaudeCodeService(lineClient);
 
   const projectService = new ProjectService(
     projectRepo, messageRepo, agentRepo, approvalRepo, webhookEventRepo,
     hearingAnswerRepo, workspaceService, workflowRunner, workflowService,
-    stateMachine, agentFactory, lineClient, gitCommandService, editorService
+    stateMachine, agentFactory, lineClient, gitCommandService, editorService, aiClient,
+    claudeCodeService,
   );
 
   const app = createServer(projectService, sessionService, messageRepo, lineClient);
 
-  // port 0 = OSが空きポートを自動割当（他の開発サーバーとの衝突を防ぐ）
-  const server = app.listen(0, config.server.host, () => {
-    const { port } = server.address() as AddressInfo;
-    // Electronがstdoutを監視してポートを取得する
-    process.stdout.write(`ASSIGNED_PORT=${port}\n`);
-    logger.info('Server started', { port, host: config.server.host });
-    logger.info('LINE Webhook endpoint', { url: `http://localhost:${port}/webhook` });
-    logger.info('Admin API', { url: `http://localhost:${port}/admin` });
+  // 起動時 Windows Update チェック（失敗してもサーバー起動は続行）
+  checkWindowsUpdateStatus().then(async (status) => {
+    if (!status.isWindows) return;
+
+    if (isUpdateImminent(status) && !status.pauseExpiry) {
+      logger.info('Windows Update pending at startup — pausing for 7 days');
+      const pauseResult = await pauseWindowsUpdate(7);
+      const msg = formatWuStatus(status, pauseResult);
+      logger.info('WU startup pause result', { ok: pauseResult.ok, expiry: pauseResult.expiry });
+
+      // ADMIN_USER_ID が設定されていれば LINE にも通知
+      const adminUserId = process.env['ADMIN_USER_ID'];
+      if (adminUserId) {
+        await lineClient.sendPush(adminUserId, `🖥️ 【起動時通知】\n${msg}`).catch(() => void 0);
+      }
+    } else if (status.rebootRequired) {
+      logger.warn('Windows reboot is pending — update applied but not yet effective');
+    }
+  }).catch((err) => {
+    logger.warn('Startup WU check failed', { err: String(err) });
   });
 
-  const shutdown = (): void => {
-    logger.info('Shutting down...');
-    server.close(() => {
-      closeDatabase();
-      process.exit(0);
+  return new Promise<ServerHandle>((resolve, reject) => {
+    const server: Server = app.listen(config.server.port, config.server.host, () => {
+      const { port } = server.address() as AddressInfo;
+      process.stdout.write(`ASSIGNED_PORT=${port}\n`);
+      logger.info('Server started', { port, host: config.server.host });
+      logger.info('LINE Webhook endpoint', { url: `http://localhost:${port}/webhook` });
+      logger.info('Admin API', { url: `http://localhost:${port}/admin` });
+      resolve({
+        port,
+        close: () => new Promise<void>((res) => {
+          server.close(() => { closeDatabase(); res(); });
+        }),
+      });
     });
-  };
 
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
+    server.on('error', reject);
+  });
 }
 
-main().catch((err: unknown) => {
-  console.error('Fatal startup error:', err);
-  process.exit(1);
-});
+// スタンドアロン起動（npm run dev / npm start）
+if (require.main === module) {
+  startServer().then(({ port, close }) => {
+    logger.info('Running standalone', { port });
+
+    const shutdown = (): void => {
+      logger.info('Shutting down...');
+      close().then(() => process.exit(0)).catch(() => process.exit(1));
+    };
+
+    process.on('SIGTERM', shutdown);
+    process.on('SIGINT', shutdown);
+  }).catch((err: unknown) => {
+    console.error('Fatal startup error:', err);
+    process.exit(1);
+  });
+}

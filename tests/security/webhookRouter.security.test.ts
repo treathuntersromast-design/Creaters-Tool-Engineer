@@ -29,6 +29,7 @@ function buildApp(overrides: Partial<WebhookRouterDeps> = {}) {
     isSessionPendingOtp: jest.fn().mockReturnValue(false),
     verifySessionOtp: jest.fn().mockResolvedValue(false),
     endSession: jest.fn().mockResolvedValue(undefined),
+    isClaudePlanPending: jest.fn().mockReturnValue(false),
     recordInboundMessage: jest.fn(),
     ...overrides,
   };

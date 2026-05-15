@@ -1,193 +1,79 @@
-import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
-import { spawn, ChildProcess, execFile } from 'child_process';
+import { app, BrowserWindow, ipcMain, dialog } from 'electron';
+import { spawn, spawnSync, ChildProcess } from 'child_process';
+import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
 
-dotenv.config({ path: path.join(__dirname, '..', '.env') });
+// パッケージ済み: userData内の.env（初回はEXE隣からコピー）/ 開発時: プロジェクトルートの.env
+function resolveEnvPath(): string {
+  if (!app.isPackaged) return path.join(__dirname, '..', '.env');
 
-let adminBase = ''; // サーバー起動後に動的セット
+  const userDataEnv = path.join(app.getPath('userData'), '.env');
+  const exeDirEnv   = path.join(path.dirname(process.execPath), '.env');
+
+  if (fs.existsSync(userDataEnv)) return userDataEnv;
+
+  // 初回起動: EXE隣の.envをuserDataへコピーして永続化
+  if (fs.existsSync(exeDirEnv)) {
+    fs.copyFileSync(exeDirEnv, userDataEnv);
+    return userDataEnv;
+  }
+
+  return exeDirEnv;
+}
+
+const resolvedEnvPath = resolveEnvPath();
+dotenv.config({ path: resolvedEnvPath });
+// サーバーコードが設定ファイルパスを参照できるよう渡す
+process.env['ENV_FILE_PATH'] = resolvedEnvPath;
+
+// GIT_REPOS_PATHS 専用ファイル（PC固有のため .env とは別管理・gitignore 対象）
+function resolveReposPathsFile(): string {
+  if (!app.isPackaged) return path.join(__dirname, '..', 'repos-paths.local');
+  return path.join(app.getPath('userData'), 'repos-paths.local');
+}
+
+function loadReposPaths(): void {
+  const filePath = resolveReposPathsFile();
+  if (!fs.existsSync(filePath)) return;
+  const value = fs.readFileSync(filePath, 'utf8').trim();
+  if (value) process.env['GIT_REPOS_PATHS'] = value;
+}
+
+function saveReposPathsToFile(paths: string): void {
+  fs.writeFileSync(resolveReposPathsFile(), paths, 'utf8');
+}
+
+// 起動時に repos-paths.local を読み込む（.env の GIT_REPOS_PATHS より優先）
+loadReposPaths();
+
+let adminBase = '';
 let serverPort = 0;
 let ngrokDomain = '';
 let mainWindow: BrowserWindow | null = null;
-let serverProcess: ChildProcess | null = null;
 let ngrokProcess: ChildProcess | null = null;
+let serverClose: (() => Promise<void>) | null = null;
+
+// クラッシュダイアログを防ぎ、ログ欄に表示する
+process.on('uncaughtException', (err) => {
+  const msg = `[FATAL] 予期しないエラー: ${err.message}\n${err.stack ?? ''}`;
+  console.error(msg);
+  sendLog(msg);
+});
 
 function sendLog(msg: string): void {
   mainWindow?.webContents.send('log', msg);
 }
 
-// ─── Node.js 自動インストール ─────────────────────────────────────────────────
-
-/** システムの node が利用可能かチェックし、バージョン文字列を返す。なければ null */
-function getNodeVersion(): Promise<string | null> {
-  return new Promise((resolve) => {
-    execFile('node', ['--version'], { timeout: 5000 }, (err, stdout) => {
-      resolve(err ? null : stdout.trim());
-    });
-  });
-}
-
-/**
- * winget で Node.js LTS をインストールする。
- * PowerShell を呼び出し、標準出力をログに流す。
- * 成功すれば true、失敗すれば false を返す。
- */
-function installNodeViaWinget(): Promise<boolean> {
-  return new Promise((resolve) => {
-    sendLog('[Node.js] winget でインストールを開始します...');
-    const ps = spawn(
-      'powershell.exe',
-      [
-        '-NoProfile', '-NonInteractive', '-Command',
-        [
-          'winget install OpenJS.NodeJS.LTS',
-          '--silent',
-          '--accept-package-agreements',
-          '--accept-source-agreements',
-          '--source winget',
-        ].join(' '),
-      ],
-      { stdio: 'pipe' },
-    );
-
-    ps.stdout?.on('data', (d: Buffer) => {
-      sendLog(`[Node.js] ${d.toString().trim()}`);
-    });
-    ps.stderr?.on('data', (d: Buffer) => {
-      sendLog(`[Node.js] ${d.toString().trim()}`);
-    });
-    ps.on('close', (code) => resolve(code === 0));
-    ps.on('error', () => resolve(false));
-  });
-}
-
-/** インストール後、デフォルトパスを process.env.PATH に追加して node を使えるようにする */
-function refreshNodePath(): void {
-  const defaults = [
-    'C:\\Program Files\\nodejs',
-    `${process.env['APPDATA'] ?? ''}\\npm`,
-  ];
-  for (const p of defaults) {
-    if (p && !process.env['PATH']?.includes(p)) {
-      process.env['PATH'] = `${p};${process.env['PATH'] ?? ''}`;
-    }
-  }
-}
-
-/**
- * Node.js が存在しなければ確認ダイアログを出してインストールを試みる。
- * true = 起動続行可、false = 起動不可（アプリを終了すべき）
- */
-async function ensureNodeJs(): Promise<boolean> {
-  const version = await getNodeVersion();
-  if (version) {
-    sendLog(`Node.js ${version} を検出しました`);
-    return true;
-  }
-
-  sendLog('[警告] Node.js が見つかりません');
-
-  const { response } = await dialog.showMessageBox({
-    type: 'question',
-    buttons: ['インストール（winget）', '手動でインストール', 'キャンセル'],
-    defaultId: 0,
-    cancelId: 2,
-    title: 'Node.js が必要です',
-    message: 'このアプリの動作には Node.js（LTS版）が必要です。',
-    detail:
-      '「インストール」を選ぶと winget を使って自動でインストールします。\n' +
-      '管理者権限の確認（UAC）が表示される場合があります。\n\n' +
-      '「手動でインストール」を選ぶと公式サイトを開きます。\n' +
-      'インストール後にアプリを再起動してください。',
-  });
-
-  if (response === 1) {
-    // 手動インストール：公式サイトを開いて終了
-    await shell.openExternal('https://nodejs.org/ja/download/');
-    sendLog('[Node.js] 公式サイトを開きました。インストール後にアプリを再起動してください。');
-    return false;
-  }
-
-  if (response === 2) {
-    sendLog('[Node.js] キャンセルされました。アプリを終了します。');
-    return false;
-  }
-
-  // winget インストール
-  const installed = await installNodeViaWinget();
-  if (!installed) {
-    await dialog.showMessageBox({
-      type: 'error',
-      title: 'インストール失敗',
-      message: 'Node.js の自動インストールに失敗しました。',
-      detail:
-        '公式サイト ( https://nodejs.org ) から手動でインストールしてください。\n' +
-        'インストール後にアプリを再起動してください。',
-    });
-    sendLog('[エラー] Node.js のインストールに失敗しました。手動でインストールしてください: https://nodejs.org');
-    await shell.openExternal('https://nodejs.org/ja/download/');
-    return false;
-  }
-
-  refreshNodePath();
-
-  const newVersion = await getNodeVersion();
-  if (newVersion) {
-    sendLog(`Node.js ${newVersion} のインストールが完了しました`);
-    return true;
-  }
-
-  // インストール成功でも PATH 未反映の場合（要再起動）
-  await dialog.showMessageBox({
-    type: 'info',
-    title: 'インストール完了',
-    message: 'Node.js のインストールが完了しました。',
-    detail: 'アプリを再起動して続行してください。',
-  });
-  sendLog('[Node.js] インストール完了。アプリを再起動してください。');
-  return false;
-}
-
-/** サーバーを起動し、割り当てられたポート番号を返す（最大30秒待機） */
-function startServer(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const serverScript = path.join(__dirname, '..', 'dist', 'index.js');
-    serverProcess = spawn('node', [serverScript], {
-      env: { ...process.env },
-      cwd: path.join(__dirname, '..'),
-      stdio: 'pipe',
-    });
-
-    const timeout = setTimeout(() => {
-      reject(new Error('サーバーの起動がタイムアウトしました'));
-    }, 30_000);
-
-    serverProcess.stdout?.on('data', (data: Buffer) => {
-      const text = data.toString();
-      // ASSIGNED_PORT=XXXXX を受信したらポート確定
-      const match = text.match(/ASSIGNED_PORT=(\d+)/);
-      if (match) {
-        clearTimeout(timeout);
-        resolve(parseInt(match[1]!, 10));
-      }
-      const trimmed = text.trim();
-      if (trimmed) sendLog(trimmed);
-    });
-    serverProcess.stderr?.on('data', (data: Buffer) => {
-      sendLog(`[ERR] ${data.toString().trim()}`);
-    });
-    serverProcess.on('exit', (code) => {
-      clearTimeout(timeout);
-      sendLog(`[サーバー終了 code=${code}]`);
-      serverProcess = null;
-    });
-    serverProcess.on('error', (err) => {
-      clearTimeout(timeout);
-      sendLog(`[ERROR] サーバー起動失敗: ${err.message}`);
-      serverProcess = null;
-      reject(err);
-    });
-  });
+// サーバーをElectronのメインプロセス内で直接起動（システムNode.js不要）
+async function startServer(): Promise<number> {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { startServer: startAppServer } = require('../dist/index') as {
+    startServer: () => Promise<{ port: number; close: () => Promise<void> }>;
+  };
+  const handle = await startAppServer();
+  serverClose = handle.close;
+  return handle.port;
 }
 
 function notifyServerInfo(): void {
@@ -199,7 +85,8 @@ function notifyServerInfo(): void {
 }
 
 function startNgrok(port: number): void {
-  const domain = process.env['NGROK_DOMAIN'];
+  const domain   = process.env['NGROK_DOMAIN'];
+  const authtoken = process.env['NGROK_AUTHTOKEN'];
   if (!domain) {
     sendLog('[ngrok] NGROK_DOMAIN が未設定のため自動起動をスキップします');
     return;
@@ -207,49 +94,74 @@ function startNgrok(port: number): void {
 
   ngrokDomain = domain;
 
-  ngrokProcess = spawn('ngrok', ['http', `--url=${domain}`, String(port)], {
-    stdio: 'pipe',
-  });
+  // 前回のngrokプロセスが残っていたら強制終了（ERR_NGROK_334対策）
+  spawnSync('taskkill', ['/F', '/IM', 'ngrok.exe'], { stdio: 'ignore' });
+
+  const args = ['http', `--url=${domain}`, String(port)];
+
+  // NGROK_AUTHTOKEN は環境変数で渡す（--authtoken フラグは http サブコマンドでは無効）
+  const spawnEnv = { ...process.env };
+  if (authtoken) spawnEnv['NGROK_AUTHTOKEN'] = authtoken;
+
+  ngrokProcess = spawn('ngrok', args, { stdio: 'pipe', env: spawnEnv });
+
+  let tunnelConnected = false;
+
+  function checkSuccess(text: string): void {
+    if (tunnelConnected) return;
+    // ngrok v3: JSON形式 {"msg":"started tunnel"} またはプレーンテキスト
+    const isSuccess = text.includes('"started tunnel"') ||
+                      text.includes('started tunnel') ||
+                      text.includes(`https://${domain}`);
+    // エラーキーワードが含まれる場合は成功扱いしない
+    const isError = text.toLowerCase().includes('error') ||
+                    text.toLowerCase().includes('err_ngrok') ||
+                    text.toLowerCase().includes('failed');
+    if (isSuccess && !isError) {
+      tunnelConnected = true;
+      sendLog(`[ngrok] トンネル接続完了: https://${domain}/webhook`);
+      notifyServerInfo();
+    }
+  }
 
   ngrokProcess.stdout?.on('data', (data: Buffer) => {
     const text = data.toString().trim();
     if (text) sendLog(`[ngrok] ${text}`);
-    if (text.includes('started tunnel') || text.includes(domain)) {
-      sendLog(`[ngrok] トンネル接続完了: https://${domain}/webhook`);
-      notifyServerInfo();
-    }
+    checkSuccess(text);
   });
+
   ngrokProcess.stderr?.on('data', (data: Buffer) => {
+    // stderr はすべてログに流す（エラー内容を確認できるように）
     const text = data.toString().trim();
-    if (!text) return;
-    if (text.includes('started tunnel') || text.includes(domain)) {
-      sendLog(`[ngrok] トンネル接続完了: https://${domain}/webhook`);
-      notifyServerInfo();
-    } else if (text.includes('error') || text.includes('ERR_')) {
-      sendLog(`[ngrok エラー] ${text}`);
-    } else {
-      sendLog(`[ngrok] ${text}`);
-    }
+    if (text) sendLog(`[ngrok] ${text}`);
+    checkSuccess(text);
   });
+
   ngrokProcess.on('exit', (code) => {
-    sendLog(`[ngrok終了 code=${code}]`);
+    if (code !== 0) {
+      sendLog(`[ngrok エラー] 終了コード ${code}。NGROK_AUTHTOKEN と NGROK_DOMAIN が正しいか確認してください。`);
+    } else {
+      sendLog(`[ngrok] 終了 code=${code}`);
+    }
     ngrokProcess = null;
   });
+
   ngrokProcess.on('error', (err) => {
-    sendLog(`[ERROR] ngrok起動失敗: ${err.message}`);
+    sendLog(`[ngrok エラー] 起動失敗: ${err.message}（ngrokがインストール済みか確認してください）`);
     ngrokProcess = null;
   });
 
   sendLog(`[ngrok] 起動中... → https://${domain}`);
-  // Emit info now so UI can show the URL; tunnel may take a moment to connect
   notifyServerInfo();
 }
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
-    width: 520,
-    height: 700,
-    resizable: false,
+    width: 560,
+    height: 860,
+    resizable: true,
+    minWidth: 420,
+    minHeight: 600,
     title: 'Creaters Tool Engineer',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -258,11 +170,40 @@ function createWindow(): void {
     },
   });
 
-  // renderer is always at dist-electron/renderer/ (copied during electron:compile)
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   mainWindow.setMenuBarVisibility(false);
   mainWindow.on('closed', () => { mainWindow = null; });
 }
+
+// ─── Setup IPC handlers ───────────────────────────────────────────────────────
+
+ipcMain.handle('setup:isFirstRun', () => {
+  // repos-paths.local が存在しなければ初回とみなす
+  return !fs.existsSync(resolveReposPathsFile());
+});
+
+ipcMain.handle('setup:pickFolder', async () => {
+  const result = await dialog.showOpenDialog(mainWindow!, {
+    properties: ['openDirectory'],
+    title: 'プロジェクトフォルダを選択してください',
+    buttonLabel: 'このフォルダを選択',
+  });
+  return result.canceled ? null : (result.filePaths[0] ?? null);
+});
+
+ipcMain.handle('setup:saveReposPaths', (_event, paths: string) => {
+  try {
+    saveReposPathsToFile(paths);
+    process.env['GIT_REPOS_PATHS'] = paths;
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+});
+
+ipcMain.handle('setup:getReposPaths', () => {
+  return process.env['GIT_REPOS_PATHS'] ?? '';
+});
 
 // ─── IPC handlers ────────────────────────────────────────────────────────────
 
@@ -273,8 +214,10 @@ ipcMain.handle('admin:getServerInfo', () => ({
 }));
 
 ipcMain.handle('admin:getUsers', async () => {
+  if (!adminBase) return { users: [], error: 'サーバー起動中...' };
   try {
     const res = await fetch(`${adminBase}/users`);
+    if (!res.ok) return { users: [], error: `HTTP ${res.status}` };
     return await res.json();
   } catch (err) {
     return { users: [], error: String(err) };
@@ -312,16 +255,28 @@ ipcMain.handle('admin:stopSession', async () => {
   }
 });
 
+ipcMain.handle('chat:send', async (_event, text: string, userId: string) => {
+  if (!serverPort) return { messages: ['サーバー起動中です。しばらくお待ちください。'] };
+  try {
+    const res = await fetch(`http://localhost:${serverPort}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, userId }),
+    });
+    if (!res.ok) return { messages: [`サーバーエラー: HTTP ${res.status}`] };
+    return await res.json();
+  } catch (err) {
+    return { messages: [`接続エラー: ${String(err)}`] };
+  }
+});
+
 // ─── App lifecycle ────────────────────────────────────────────────────────────
 
 app.whenReady().then(async () => {
   createWindow();
   sendLog('起動中...');
-
-  const nodeReady = await ensureNodeJs();
-  if (!nodeReady) return;
-
   sendLog('サーバーを起動しています...');
+
   try {
     const port = await startServer();
     serverPort = port;
@@ -335,13 +290,10 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
-  if (serverProcess) {
-    serverProcess.kill('SIGTERM');
-    serverProcess = null;
-  }
   if (ngrokProcess) {
     ngrokProcess.kill('SIGTERM');
     ngrokProcess = null;
   }
-  app.quit();
+  const cleanup = serverClose ? serverClose() : Promise.resolve();
+  cleanup.finally(() => app.quit());
 });

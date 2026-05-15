@@ -12,7 +12,7 @@ function buildService(gitOverrides: Partial<Record<keyof GitService, jest.Mock>>
   } as unknown as LineClient;
 
   const gitService = {
-    run: jest.fn().mockResolvedValue({ ok: true, stdout: '', stderr: '' }),
+    run: jest.fn().mockResolvedValue({ ok: true, stdout: 'main', stderr: '' }),
     status: jest.fn().mockResolvedValue({ ok: true, stdout: '## main...origin/main', stderr: '' }),
     fetch: jest.fn().mockResolvedValue({ ok: true, stdout: 'Already up to date.', stderr: '' }),
     pull: jest.fn().mockResolvedValue({ ok: true, stdout: 'Already up to date.', stderr: '' }),
@@ -21,6 +21,11 @@ function buildService(gitOverrides: Partial<Record<keyof GitService, jest.Mock>>
     branchList: jest.fn().mockResolvedValue({ ok: true, stdout: '* main\n  dev', stderr: '' }),
     checkout: jest.fn().mockResolvedValue({ ok: true, stdout: "Switched to branch 'dev'", stderr: '' }),
     diff: jest.fn().mockResolvedValue({ ok: true, stdout: '1 file changed', stderr: '' }),
+    addAll: jest.fn().mockResolvedValue({ ok: true, stdout: '', stderr: '' }),
+    commit: jest.fn().mockResolvedValue({ ok: true, stdout: '[main abc1234] commit', stderr: '' }),
+    diffCachedStat: jest.fn().mockResolvedValue({ ok: true, stdout: ' src/foo.ts | 5 ++\n1 file changed, 5 insertions(+)', stderr: '' }),
+    merge: jest.fn().mockResolvedValue({ ok: true, stdout: 'Merge made by the recursive strategy.', stderr: '' }),
+    init: jest.fn().mockResolvedValue({ ok: true, stdout: 'Initialized empty Git repository', stderr: '' }),
     ...gitOverrides,
   } as unknown as GitService;
 
@@ -165,40 +170,50 @@ describe('GitCommandService', () => {
     });
   });
 
-  // ── handlePush (HIGH risk — requires confirmation) ──────────────────────
+  // ── handlePush (直接実行 — 明示的 LINE 指示は確認不要) ────────────────────
   describe('handlePush', () => {
-    it('sets pending action and sends confirmation request', async () => {
+    it('executes push immediately without confirmation', async () => {
       const { svc, gitService, gitSession, pushMessages } = buildService();
       gitSession.selectRepo(FAKE_REPO_PATH);
       (gitService.run as jest.Mock).mockResolvedValue({ ok: true, stdout: 'main', stderr: '' });
 
       await svc.handlePush(FAKE_USER);
 
-      expect(pushMessages[0]?.text).toContain('高リスク操作');
-      expect(pushMessages[0]?.text).toContain('はい');
+      expect(gitService.push).toHaveBeenCalledWith(FAKE_REPO_PATH);
+      expect(pushMessages.some((m) => m.text.includes('プッシュ完了'))).toBe(true);
     });
 
-    it('does NOT push immediately — waits for confirmation', async () => {
-      const { svc, gitService, gitSession } = buildService();
+    it('sends failure message on push error', async () => {
+      const { svc, gitSession, pushMessages } = buildService({
+        push: jest.fn().mockResolvedValue({ ok: false, stdout: '', stderr: 'rejected' }),
+      });
       gitSession.selectRepo(FAKE_REPO_PATH);
-      (gitService.run as jest.Mock).mockResolvedValue({ ok: true, stdout: 'main', stderr: '' });
+      (buildService().gitService.run as jest.Mock | undefined);
 
-      await svc.handlePush(FAKE_USER);
-
-      expect(gitService.push).not.toHaveBeenCalled();
+      const { svc: svc2, gitSession: gs2, pushMessages: pm2 } = buildService({
+        run:  jest.fn().mockResolvedValue({ ok: true, stdout: 'main', stderr: '' }),
+        push: jest.fn().mockResolvedValue({ ok: false, stdout: '', stderr: 'rejected' }),
+      });
+      gs2.selectRepo(FAKE_REPO_PATH);
+      await svc2.handlePush(FAKE_USER);
+      expect(pm2.some((m) => m.text.includes('プッシュ失敗'))).toBe(true);
     });
   });
 
   // ── handleConfirm / handleCancel ─────────────────────────────────────────
   describe('handleConfirm', () => {
-    it('executes pending action', async () => {
+    it('executes pending action set via gitSession directly', async () => {
       const { svc, gitService, gitSession, pushMessages } = buildService();
       gitSession.selectRepo(FAKE_REPO_PATH);
-      (gitService.run as jest.Mock)
-        .mockResolvedValueOnce({ ok: true, stdout: 'main', stderr: '' })  // rev-parse
-        .mockResolvedValueOnce({ ok: true, stdout: 'pushed!', stderr: '' }); // actual push
+      gitSession.setPending({
+        operationType: 'GIT_PUSH',
+        args: ['push'],
+        description: 'test push',
+        repoPath: FAKE_REPO_PATH,
+        repoName: 'repo',
+      });
+      (gitService.run as jest.Mock).mockResolvedValue({ ok: true, stdout: 'pushed!', stderr: '' });
 
-      await svc.handlePush(FAKE_USER);
       await svc.handleConfirm(FAKE_USER);
 
       const done = pushMessages.find((m) => m.text.includes('完了'));
@@ -212,8 +227,7 @@ describe('GitCommandService', () => {
     });
 
     it('pending action expires after 5 minutes', () => {
-      const { svc, gitSession } = buildService();
-      gitSession.selectRepo(FAKE_REPO_PATH);
+      const { gitSession } = buildService();
       gitSession.setPending({
         operationType: 'GIT_PUSH',
         args: ['push'],
@@ -222,9 +236,8 @@ describe('GitCommandService', () => {
         repoName: 'repo',
       });
 
-      // Simulate expiry by overriding expiresAt
       const pending = gitSession.getPending()!;
-      (pending as any).expiresAt = new Date(Date.now() - 1000);
+      (pending as unknown as { expiresAt: Date }).expiresAt = new Date(Date.now() - 1000);
 
       expect(gitSession.getPending()).toBeNull();
     });
@@ -232,14 +245,18 @@ describe('GitCommandService', () => {
 
   describe('handleCancel', () => {
     it('clears pending action', async () => {
-      const { svc, gitService, gitSession, pushMessages } = buildService();
-      gitSession.selectRepo(FAKE_REPO_PATH);
-      (gitService.run as jest.Mock).mockResolvedValue({ ok: true, stdout: 'main', stderr: '' });
+      const { svc, gitSession, pushMessages } = buildService();
+      gitSession.setPending({
+        operationType: 'GIT_PUSH',
+        args: ['push'],
+        description: 'test push',
+        repoPath: FAKE_REPO_PATH,
+        repoName: 'repo',
+      });
 
-      await svc.handlePush(FAKE_USER);
       await svc.handleCancel(FAKE_USER);
 
-      expect(pushMessages[1]?.text).toContain('キャンセル');
+      expect(pushMessages[0]?.text).toContain('キャンセル');
       expect(gitSession.getPending()).toBeNull();
     });
 

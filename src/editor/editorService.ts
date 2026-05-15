@@ -145,6 +145,9 @@ export class EditorService {
       stdio: 'ignore',
       windowsHide: false,  // editor window should appear on screen
     });
+    proc.on('error', (err) => {
+      logger.warn('Editor launch failed', { command, err: err.message });
+    });
     proc.unref(); // let it live beyond the parent process
   }
 

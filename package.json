@@ -8,12 +8,12 @@
     "dev": "ts-node src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "jest",
+    "test": "npm rebuild better-sqlite3 && jest && npm run electron:rebuild",
     "typecheck": "tsc --noEmit",
     "electron:compile": "tsc -p tsconfig.electron.json && xcopy /E /I /Y electron\\renderer dist-electron\\renderer > nul",
     "electron:rebuild": "electron-rebuild -f -w better-sqlite3",
     "electron:dev": "npm run build && npm run electron:compile && node scripts/launch-electron.js dist-electron/main.js",
-    "electron:build": "npm run build && npm run electron:compile && electron-packager . \"Creaters Tool Engineer\" --platform=win32 --arch=x64 --out=release --overwrite --electron-version=33.4.11 --no-asar --ignore=\"^/(release|tests|electron|src)($|/)\" --ignore=\"\\.ts$\""
+    "electron:build": "npm run build && npm run electron:compile && node scripts/build-exe.js"
   },
   "build": {
     "appId": "com.creaters-tool-engineer.app",
@@ -53,6 +53,7 @@
     "@anthropic-ai/sdk": "^0.95.2",
     "better-sqlite3": "^12.9.0",
     "dotenv": "^16.4.5",
+    "exceljs": "^4.4.0",
     "express": "^4.19.2",
     "winston": "^3.13.0"
   },

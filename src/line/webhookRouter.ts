@@ -8,7 +8,11 @@ import { logger } from '../utils/logger';
 const MAX_MESSAGE_LENGTH = 2000;
 
 export interface WebhookRouterDeps {
-  handleCommand: (command: ReturnType<typeof parseLineMessage> | { type: 'HEARING_REPLY'; content: string; userId: string }) => Promise<void>;
+  handleCommand: (command:
+    | ReturnType<typeof parseLineMessage>
+    | { type: 'HEARING_REPLY'; content: string; userId: string }
+    | { type: 'CLAUDE_CONFIRM'; content: string; userId: string }
+  ) => Promise<void>;
   handleWebhookEvent: (event: LineEvent, eventId: string) => Promise<{ isDuplicate: boolean }>;
   sendReply: (replyToken: string, text: string) => Promise<void>;
   getUserProjectStatus: (userId: string) => string | null;
@@ -18,6 +22,8 @@ export interface WebhookRouterDeps {
   endSession: () => Promise<void>;
   /** 未認証ユーザーのメッセージをユーザーリスト用に保存する */
   recordInboundMessage: (userId: string, text: string, lineMessageId: string | null) => void;
+  /** Claude Code のプランが確認待ちかどうか */
+  isClaudePlanPending: (userId: string) => boolean;
 }
 
 export function createWebhookRouter(deps: WebhookRouterDeps): Router {
@@ -117,6 +123,12 @@ async function processEvent(event: LineEvent, deps: WebhookRouterDeps): Promise<
     return;
   }
 
+  // Claude plan confirmation — intercept before normal parsing
+  if (deps.isClaudePlanPending(userId)) {
+    await deps.handleCommand({ type: 'CLAUDE_CONFIRM', content: text, userId });
+    return;
+  }
+
   // Security filter — block dangerous instructions before any processing
   const secCheck = filterMessage(text);
   if (secCheck.blocked) {
@@ -140,21 +152,10 @@ async function processEvent(event: LineEvent, deps: WebhookRouterDeps): Promise<
     return;
   }
 
-  // HEARING中の入力は、認識されたコマンドでもヒアリング回答として扱う
-  // (GIT_CONFIRM「はい」等がヒアリング回答に干渉しないように)
+  // UNKNOWN は常にAI分類へ（HEARINGでもAIがヒアリング回答かコマンドかを判断）
   const projectStatus = deps.getUserProjectStatus(userId);
   if (parsed.type === 'UNKNOWN') {
-    if (projectStatus === 'HEARING') {
-      await deps.handleCommand({ type: 'HEARING_REPLY', content: text, userId });
-    } else {
-      if (event.replyToken) {
-        await deps.sendReply(event.replyToken, [
-          'コマンドが認識できませんでした。',
-          '',
-          '「コマンド一覧」と送ると使えるコマンドを表示します。',
-        ].join('\n'));
-      }
-    }
+    await deps.handleCommand(parsed);
     return;
   }
 

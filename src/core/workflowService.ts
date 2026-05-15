@@ -9,6 +9,15 @@ import { StateMachine } from './stateMachine';
 import { AgentFactory } from '../agents/AgentFactory';
 import { AgentContext, AgentResult } from '../agents/Agent';
 import { logger } from '../utils/logger';
+import {
+  generateRequirementsExcel,
+  generateBasicDesignExcel,
+  generateDetailedDesignExcel,
+  generateTestSpecExcel,
+  generateManualTestSpecExcel,
+  generateIssueListExcel,
+  generateScreenDesignExcel,
+} from '../documents/excelService';
 
 export function sanitizeError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
@@ -107,6 +116,11 @@ export class WorkflowService {
         this.syncProjectState(projectId);
         previousResults.push(result);
 
+        // Excel書類を非同期生成（失敗してもパイプラインを止めない）
+        this.generatePhaseExcel(projectId, targetStatus, project.workspacePath, project.name).catch((e) => {
+          logger.warn('Excel generation failed', { projectId, phase: targetStatus, err: String(e) });
+        });
+
         await this.lineClient.sendPush(project.userId, `✅ ${this.phaseName(targetStatus)} が完了しました`);
       } catch (err) {
         const errMsg = sanitizeError(err);
@@ -114,6 +128,38 @@ export class WorkflowService {
         this.taskRepo.updateOutput(task.id, 'FAILED', errMsg);
         throw err;
       }
+    }
+  }
+
+  private async generatePhaseExcel(
+    projectId: string,
+    status: string,
+    workspacePath: string,
+    projectName: string,
+  ): Promise<void> {
+    const answers = this.hearingAnswerRepo.findByProjectId(projectId);
+    if (!answers) return;
+
+    switch (status) {
+      case 'REQUIREMENTS':
+        await generateRequirementsExcel(workspacePath, projectName, answers);
+        break;
+      case 'BASIC_DESIGN':
+        await generateBasicDesignExcel(workspacePath, projectName, answers);
+        if (answers.screens && answers.screens.trim()) {
+          await generateScreenDesignExcel(workspacePath, projectName, answers);
+        }
+        break;
+      case 'DETAILED_DESIGN':
+        await generateDetailedDesignExcel(workspacePath, projectName, answers, true);
+        break;
+      case 'TESTING':
+        await generateTestSpecExcel(workspacePath, projectName);
+        await generateManualTestSpecExcel(workspacePath, projectName);
+        break;
+      case 'WAITING_APPROVAL':
+        await generateIssueListExcel(workspacePath, projectName);
+        break;
     }
   }
 

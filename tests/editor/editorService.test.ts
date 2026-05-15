@@ -3,7 +3,7 @@ import { EditorService } from '../../src/editor/editorService';
 // Mock child_process to avoid real process spawning in tests
 jest.mock('child_process', () => ({
   execFile: jest.fn(),
-  spawn: jest.fn(() => ({ unref: jest.fn() })),
+  spawn: jest.fn(() => ({ unref: jest.fn(), on: jest.fn() })),
 }));
 
 // Mock fs to control path existence checks
@@ -372,7 +372,7 @@ describe('EditorService', () => {
 
     it('does not throw when targetPath is absolute', () => {
       const { service } = buildService();
-      mockSpawn.mockReturnValue({ unref: jest.fn() });
+      mockSpawn.mockReturnValue({ unref: jest.fn(), on: jest.fn() });
       expect(() =>
         (service as unknown as { launchProcess(cmd: string, p: string): void })
           .launchProcess('code', 'C:\\Users\\test\\project'),
@@ -381,7 +381,7 @@ describe('EditorService', () => {
 
     it('does not throw when targetPath is undefined', () => {
       const { service } = buildService();
-      mockSpawn.mockReturnValue({ unref: jest.fn() });
+      mockSpawn.mockReturnValue({ unref: jest.fn(), on: jest.fn() });
       expect(() =>
         (service as unknown as { launchProcess(cmd: string, p?: string): void })
           .launchProcess('code'),

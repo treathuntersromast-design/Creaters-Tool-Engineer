@@ -5,7 +5,8 @@ const execAsync = promisify(execFile);
 
 const ALLOWED_GIT_SUBCOMMANDS = new Set([
   'status', 'fetch', 'pull', 'push', 'log',
-  'branch', 'checkout', 'diff', 'rev-parse', 'remote',
+  'branch', 'checkout', 'diff', 'rev-parse', 'remote', 'ls-files', 'init',
+  'add', 'commit', 'merge',
 ]);
 
 export interface GitResult {
@@ -67,5 +68,26 @@ export class GitService {
 
   diff(repoPath: string): Promise<GitResult> {
     return this.run(repoPath, ['diff', '--stat']);
+  }
+
+  init(repoPath: string): Promise<GitResult> {
+    return this.run(repoPath, ['init']);
+  }
+
+  addAll(repoPath: string): Promise<GitResult> {
+    return this.run(repoPath, ['add', '-A']);
+  }
+
+  /** コミットメッセージはコマンド側で `yyyyMMdd_概要` 形式に整形済みであること */
+  commit(repoPath: string, message: string): Promise<GitResult> {
+    return this.run(repoPath, ['commit', '-m', message]);
+  }
+
+  diffCachedStat(repoPath: string): Promise<GitResult> {
+    return this.run(repoPath, ['diff', '--cached', '--stat']);
+  }
+
+  merge(repoPath: string, branch: string): Promise<GitResult> {
+    return this.run(repoPath, ['merge', branch]);
   }
 }
