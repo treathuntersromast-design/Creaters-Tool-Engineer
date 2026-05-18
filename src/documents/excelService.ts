@@ -14,7 +14,7 @@ function ensureDir(filePath: string): void {
 
 function headerRow(sheet: ExcelJS.Worksheet, cols: string[], color = '2F5496'): void {
   const row = sheet.addRow(cols);
-  row.eachCell((cell) => {
+  row.eachCell((cell: ExcelJS.Cell) => {
     cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: `FF${color}` } };
     cell.font  = { bold: true, color: { argb: 'FFFFFFFF' } };
     cell.border = { bottom: { style: 'thin' } };
