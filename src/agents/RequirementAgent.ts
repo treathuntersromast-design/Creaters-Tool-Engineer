@@ -2,8 +2,9 @@ import { Agent, AgentResult, AgentContext } from './Agent';
 import { generateRequirements } from '../documents/documentGenerator';
 import { AiClient } from '../ai/aiClient';
 import { HearingAnswer } from '../db/repositories/hearingAnswerRepository';
+import { withPhasedPreamble, withLessonsContext, withRevisionContext } from './phasedPreamble';
 
-const SYSTEM_PROMPT = `あなたはソフトウェア開発プロジェクトの要件定義専門家です。
+const BASE_SYSTEM_PROMPT = `あなたはソフトウェア開発プロジェクトの要件定義専門家です。
 ユーザーのヒアリング回答を元に、詳細な要件定義書をMarkdown形式で日本語作成してください。
 
 以下のセクションを必ず含めること:
@@ -21,6 +22,8 @@ const SYSTEM_PROMPT = `あなたはソフトウェア開発プロジェクトの
 ## 11. 制約・リスク
 
 内容は具体的かつ実装可能なレベルで記述すること。`;
+
+const SYSTEM_PROMPT = withPhasedPreamble(BASE_SYSTEM_PROMPT, '要件定義');
 
 function formatAnswers(answers: HearingAnswer, projectName: string): string {
   return `プロジェクト名: ${projectName}
@@ -49,7 +52,9 @@ export class RequirementAgent implements Agent {
 
     if (this.aiClient) {
       try {
-        const userPrompt = formatAnswers(context.hearingAnswers, context.project.name);
+        const basePrompt = formatAnswers(context.hearingAnswers, context.project.name);
+        const withRevision = withRevisionContext(basePrompt, context.revisionContent);
+        const userPrompt = withLessonsContext(withRevision, context.lessonsLearned ?? []);
         const content = await this.aiClient.generate(SYSTEM_PROMPT, userPrompt);
         return {
           ok: true,

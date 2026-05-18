@@ -112,6 +112,27 @@ CREATE INDEX IF NOT EXISTS idx_documents_projectId ON documents(projectId);
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_projectId ON workflow_runs(projectId);
 `;
 
+export const SCHEMA_V3_SQL = `
+CREATE TABLE IF NOT EXISTS lessons_learned (
+  id TEXT PRIMARY KEY,
+  projectId TEXT REFERENCES projects(id),
+  phase TEXT NOT NULL,
+  lessonType TEXT NOT NULL CHECK(lessonType IN ('failure','success','retry','pattern')),
+  content TEXT NOT NULL,
+  score INTEGER,
+  retryCount INTEGER NOT NULL DEFAULT 0,
+  createdAt TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_lessons_phase ON lessons_learned(phase);
+CREATE INDEX IF NOT EXISTS idx_lessons_type ON lessons_learned(lessonType);
+`;
+
+/** V4: projectId インデックスが V3 で漏れていたため追加 */
+export const SCHEMA_V4_SQL = `
+CREATE INDEX IF NOT EXISTS idx_lessons_projectId ON lessons_learned(projectId);
+`;
+
 export const SCHEMA_V2_SQL = `
 CREATE TABLE IF NOT EXISTS app_session (
   id INTEGER PRIMARY KEY CHECK (id = 1),

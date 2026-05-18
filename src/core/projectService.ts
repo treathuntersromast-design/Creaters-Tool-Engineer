@@ -16,6 +16,7 @@ import { GitCommandService } from '../git/gitCommandService';
 import { EditorService } from '../editor/editorService';
 import { ClaudeCodeService } from '../claude/claudeCodeService';
 import { AiClient } from '../ai/aiClient';
+import { LessonsLearnedRepository } from '../db/repositories/lessonsLearnedRepository';
 import { discoverRepositories } from '../git/repositoryDiscovery';
 import { createProjectSlug } from '../utils/slugify';
 import { generateRevision } from '../documents/documentGenerator';
@@ -77,6 +78,7 @@ export class ProjectService {
     private readonly editorService: EditorService,
     private readonly aiClient?: AiClient,
     private readonly claudeCodeService?: ClaudeCodeService,
+    private readonly lessonsRepo?: LessonsLearnedRepository,
   ) {}
 
   async handleCommand(command: Command): Promise<void> {
@@ -169,7 +171,11 @@ export class ProjectService {
       logger.info('Force-stopped existing project', { projectId: existing.id });
     }
 
-    await this.lineClient.sendPush(userId, `✨ プロジェクト「${name}」を作成します。\nチーム構成とプランを準備しています...`);
+    // Pattern 4 – Memory + Dreaming: load lessons and include in kickoff message
+    const lessons = this.lessonsRepo?.findRecent(5) ?? [];
+    const leaderAgent = this.agentFactory.getLeaderAgent();
+    const kickoffMsg = leaderAgent.buildKickoffMessage(name, lessons);
+    await this.lineClient.sendPush(userId, kickoffMsg);
 
     // ── 自動チーム提案（pendingTeam があればそれを使い、なければ AI で生成）──
     let teamMembers: Array<{ name: string; role: string }>;

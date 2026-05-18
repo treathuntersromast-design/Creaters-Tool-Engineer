@@ -2,8 +2,9 @@ import { Agent, AgentResult, AgentContext } from './Agent';
 import { generateTestResult, generateSampleTest } from '../documents/documentGenerator';
 import { AiClient } from '../ai/aiClient';
 import { GeneratedDocument } from '../documents/documentGenerator';
+import { withPhasedPreamble, withLessonsContext, withRevisionContext } from './phasedPreamble';
 
-const SYSTEM_PROMPT = `あなたはTypeScriptのテストエンジニアです。
+const BASE_SYSTEM_PROMPT = `あなたはTypeScriptのテストエンジニアです。
 実装コードを元に、Jestを使ったユニットテストを作成してください。
 
 出力形式（必ずこの形式で出力すること）:
@@ -17,6 +18,8 @@ const SYSTEM_PROMPT = `あなたはTypeScriptのテストエンジニアです�
 - describe/it/expect を使用
 - 主要な関数・クラスのテストを含める
 - モックが必要な場合は jest.mock() を使用`;
+
+const SYSTEM_PROMPT = withPhasedPreamble(BASE_SYSTEM_PROMPT, 'テスト実装');
 
 function parseFiles(raw: string): GeneratedDocument[] {
   const files: GeneratedDocument[] = [];
@@ -49,12 +52,15 @@ export class TestAgent implements Agent {
           .map((f) => `---FILE: ${f.path}---\n${f.content}`)
           .join('\n\n');
 
-        const userPrompt = [
+        const basePrompt = [
           `プロジェクト名: ${context.project.name}`,
           `テスト範囲: ${context.hearingAnswers?.testScope ?? '単体テスト'}`,
           '',
           implFiles ? `## 実装コード\n${implFiles}` : '実装コードなし',
         ].join('\n');
+
+        const withRevision = withRevisionContext(basePrompt, context.revisionContent);
+        const userPrompt = withLessonsContext(withRevision, context.lessonsLearned ?? []);
 
         const raw = await this.aiClient.generate(SYSTEM_PROMPT, userPrompt);
         const files = parseFiles(raw);

@@ -9,6 +9,7 @@ import { ApprovalRepository } from './db/repositories/approvalRepository';
 import { WebhookEventRepository } from './db/repositories/webhookEventRepository';
 import { WorkflowRunRepository } from './db/repositories/workflowRunRepository';
 import { HearingAnswerRepository } from './db/repositories/hearingAnswerRepository';
+import { LessonsLearnedRepository } from './db/repositories/lessonsLearnedRepository';
 import { SessionRepository } from './db/repositories/sessionRepository';
 import { WorkspaceService } from './core/workspaceService';
 import { StateMachine } from './core/stateMachine';
@@ -47,6 +48,7 @@ export async function startServer(): Promise<ServerHandle> {
   const webhookEventRepo  = new WebhookEventRepository(db);
   const workflowRunRepo   = new WorkflowRunRepository(db);
   const hearingAnswerRepo = new HearingAnswerRepository(db);
+  const lessonsRepo       = new LessonsLearnedRepository(db);
   const sessionRepo       = new SessionRepository(db);
 
   sessionRepo.cleanupExpiredOtp();
@@ -67,7 +69,7 @@ export async function startServer(): Promise<ServerHandle> {
 
   const workflowService = new WorkflowService(
     projectRepo, taskRepo, agentRepo, documentRepo, hearingAnswerRepo,
-    workspaceService, lineClient, stateMachine, agentFactory
+    workspaceService, lineClient, stateMachine, agentFactory, lessonsRepo
   );
 
   const workflowRunner = new WorkflowRunner(
@@ -84,7 +86,7 @@ export async function startServer(): Promise<ServerHandle> {
     projectRepo, messageRepo, agentRepo, approvalRepo, webhookEventRepo,
     hearingAnswerRepo, workspaceService, workflowRunner, workflowService,
     stateMachine, agentFactory, lineClient, gitCommandService, editorService, aiClient,
-    claudeCodeService,
+    claudeCodeService, lessonsRepo,
   );
 
   const app = createServer(projectService, sessionService, messageRepo, lineClient);

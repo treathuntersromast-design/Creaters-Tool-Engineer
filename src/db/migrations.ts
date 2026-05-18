@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { SCHEMA_V1_SQL, SCHEMA_V2_SQL } from './schema';
+import { SCHEMA_V1_SQL, SCHEMA_V2_SQL, SCHEMA_V3_SQL, SCHEMA_V4_SQL } from './schema';
 import { logger } from '../utils/logger';
 
 interface Migration {
@@ -10,6 +10,8 @@ interface Migration {
 const MIGRATIONS: Migration[] = [
   { version: 1, sql: SCHEMA_V1_SQL },
   { version: 2, sql: SCHEMA_V2_SQL },
+  { version: 3, sql: SCHEMA_V3_SQL },
+  { version: 4, sql: SCHEMA_V4_SQL },
 ];
 
 export function runMigrations(db: Database.Database): void {

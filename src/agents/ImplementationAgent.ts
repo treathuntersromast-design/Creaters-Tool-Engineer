@@ -2,8 +2,9 @@ import { Agent, AgentResult, AgentContext } from './Agent';
 import { CodeExecutor } from '../executors/CodeExecutor';
 import { AiClient } from '../ai/aiClient';
 import { GeneratedDocument } from '../documents/documentGenerator';
+import { withPhasedPreamble, withLessonsContext, withRevisionContext } from './phasedPreamble';
 
-const SYSTEM_PROMPT = `あなたはプロフェッショナルなTypeScript開発者です。
+const BASE_SYSTEM_PROMPT = `あなたはプロフェッショナルなTypeScript開発者です。
 詳細設計書を元に、TypeScriptのソースコードを生成してください。
 
 出力形式（必ずこの形式で出力すること）:
@@ -17,6 +18,8 @@ const SYSTEM_PROMPT = `あなたはプロフェッショナルなTypeScript開�
 - 日本語コメントを適切に含める
 - 実際に動作するコードを生成すること
 - import文は正確に記述すること`;
+
+const SYSTEM_PROMPT = withPhasedPreamble(BASE_SYSTEM_PROMPT, '実装（インプリメンター）');
 
 function parseFiles(raw: string): GeneratedDocument[] {
   const files: GeneratedDocument[] = [];
@@ -50,12 +53,23 @@ export class ImplementationAgent implements Agent {
           .flatMap((r) => r.files ?? [])
           .find((f) => f.path.includes('detailed-design'))?.content ?? '';
 
-        const userPrompt = [
+        // Pattern 3 – Architect-Implementer Split: use explicit architecture decisions if available
+        const archDecisions = context.architectureContext?.decisions ?? '';
+        const retryNote = context.retryCount && context.retryCount > 0
+          ? `\n⚠️ これは再試行 #${context.retryCount} です。前回の実装の品質スコアが基準未満でした。より完全で堅牢なコードを生成してください。`
+          : '';
+
+        const basePrompt = [
           `プロジェクト名: ${context.project.name}`,
           `技術スタック: ${context.hearingAnswers?.techStack ?? 'TypeScript'}`,
+          retryNote,
           '',
+          archDecisions ? `## アーキテクチャ決定（アーキテクトより）\n${archDecisions}` : '',
           detailedDoc ? `## 詳細設計書\n${detailedDoc}` : '詳細設計書なし',
-        ].join('\n');
+        ].filter(Boolean).join('\n');
+
+        const withRevision = withRevisionContext(basePrompt, context.revisionContent);
+        const userPrompt = withLessonsContext(withRevision, context.lessonsLearned ?? []);
 
         const raw = await this.aiClient.generate(SYSTEM_PROMPT, userPrompt);
         const files = parseFiles(raw);
