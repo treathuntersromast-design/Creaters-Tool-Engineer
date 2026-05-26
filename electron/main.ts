@@ -5,8 +5,9 @@ import path from 'path';
 import dotenv from 'dotenv';
 
 // パッケージ済み: userData内の.env（初回はEXE隣からコピー）/ 開発時: プロジェクトルートの.env
+// app?.isPackaged: モジュール読み込み時点で app が未初期化の場合も安全に dev 扱いにする
 function resolveEnvPath(): string {
-  if (!app.isPackaged) return path.join(__dirname, '..', '.env');
+  if (!app?.isPackaged) return path.join(__dirname, '..', '.env');
 
   const userDataEnv = path.join(app.getPath('userData'), '.env');
   const exeDirEnv   = path.join(path.dirname(process.execPath), '.env');
@@ -29,7 +30,7 @@ process.env['ENV_FILE_PATH'] = resolvedEnvPath;
 
 // GIT_REPOS_PATHS 専用ファイル（PC固有のため .env とは別管理・gitignore 対象）
 function resolveReposPathsFile(): string {
-  if (!app.isPackaged) return path.join(__dirname, '..', 'repos-paths.local');
+  if (!app?.isPackaged) return path.join(__dirname, '..', 'repos-paths.local');
   return path.join(app.getPath('userData'), 'repos-paths.local');
 }
 
