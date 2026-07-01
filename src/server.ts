@@ -18,6 +18,7 @@ export function createServer(
   sessionService: SessionService,
   messageRepo: MessageRepository,
   lineClient: LineClient,
+  internalToken: string,
 ): express.Application {
   const config = loadConfig();
   const app = express();
@@ -26,16 +27,22 @@ export function createServer(
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
   });
 
-  // スクリーンショット静的配信（ngrok 経由で LINE へ画像 URL を渡すため公開）
-  app.use('/screenshots', express.static(SCREENSHOTS_DIR));
+  // スクリーンショット静的配信（ngrok 経由で LINE が画像 URL を取得するため公開必須）。
+  // 認証は掛けられないので、ファイル名を推測不能にした上でディレクトリ探索・
+  // ドットファイルアクセスを禁止し、URL を知る者だけが取得できるようにする。
+  app.use('/screenshots', express.static(SCREENSHOTS_DIR, {
+    index: false,
+    dotfiles: 'deny',
+    fallthrough: false,
+  }));
 
   app.use(
     '/admin',
     express.json(),
-    createAdminRouter(sessionService, messageRepo, lineClient),
+    createAdminRouter(sessionService, messageRepo, lineClient, internalToken),
   );
 
-  app.use('/chat', createLocalChatRouter(projectService, lineClient));
+  app.use('/chat', createLocalChatRouter(projectService, lineClient, internalToken));
 
   app.use(
     '/webhook',

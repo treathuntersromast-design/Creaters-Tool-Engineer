@@ -50,6 +50,7 @@ loadReposPaths();
 
 let adminBase = '';
 let serverPort = 0;
+let internalToken = '';
 let ngrokDomain = '';
 let mainWindow: BrowserWindow | null = null;
 let ngrokProcess: ChildProcess | null = null;
@@ -70,10 +71,11 @@ function sendLog(msg: string): void {
 async function startServer(): Promise<number> {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { startServer: startAppServer } = require('../dist/index') as {
-    startServer: () => Promise<{ port: number; close: () => Promise<void> }>;
+    startServer: () => Promise<{ port: number; internalToken: string; close: () => Promise<void> }>;
   };
   const handle = await startAppServer();
   serverClose = handle.close;
+  internalToken = handle.internalToken;
   return handle.port;
 }
 
@@ -208,6 +210,11 @@ ipcMain.handle('setup:getReposPaths', () => {
 
 // ─── IPC handlers ────────────────────────────────────────────────────────────
 
+// 内部 API（/admin・/chat）呼び出し用ヘッダー。共有トークンで ngrok 越しの外部アクセスを弾く。
+function internalHeaders(extra?: Record<string, string>): Record<string, string> {
+  return { 'x-internal-token': internalToken, ...(extra ?? {}) };
+}
+
 ipcMain.handle('admin:getServerInfo', () => ({
   port: serverPort,
   ngrokDomain,
@@ -217,7 +224,7 @@ ipcMain.handle('admin:getServerInfo', () => ({
 ipcMain.handle('admin:getUsers', async () => {
   if (!adminBase) return { users: [], error: 'サーバー起動中...' };
   try {
-    const res = await fetch(`${adminBase}/users`);
+    const res = await fetch(`${adminBase}/users`, { headers: internalHeaders() });
     if (!res.ok) return { users: [], error: `HTTP ${res.status}` };
     return await res.json();
   } catch (err) {
@@ -227,7 +234,7 @@ ipcMain.handle('admin:getUsers', async () => {
 
 ipcMain.handle('admin:getStatus', async () => {
   try {
-    const res = await fetch(`${adminBase}/session/status`);
+    const res = await fetch(`${adminBase}/session/status`, { headers: internalHeaders() });
     return await res.json();
   } catch (err) {
     return { status: 'INACTIVE', error: String(err) };
@@ -238,7 +245,7 @@ ipcMain.handle('admin:startSession', async (_event, userId: string) => {
   try {
     const res = await fetch(`${adminBase}/session/start`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: internalHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ userId }),
     });
     return await res.json();
@@ -249,7 +256,7 @@ ipcMain.handle('admin:startSession', async (_event, userId: string) => {
 
 ipcMain.handle('admin:stopSession', async () => {
   try {
-    const res = await fetch(`${adminBase}/session/stop`, { method: 'POST' });
+    const res = await fetch(`${adminBase}/session/stop`, { method: 'POST', headers: internalHeaders() });
     return await res.json();
   } catch (err) {
     return { ok: false, message: String(err) };
@@ -261,7 +268,7 @@ ipcMain.handle('chat:send', async (_event, text: string, userId: string) => {
   try {
     const res = await fetch(`http://localhost:${serverPort}/chat`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: internalHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ text, userId }),
     });
     if (!res.ok) return { messages: [`サーバーエラー: HTTP ${res.status}`] };

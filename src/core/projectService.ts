@@ -29,6 +29,7 @@ import {
   formatWuStatus,
 } from '../system/windowsUpdateService';
 import { takeScreenshot, pruneScreenshots } from '../system/screenshotService';
+import { safeWorkspacePath } from '../utils/safePath';
 import { SCREENSHOTS_DIR } from '../server';
 import { logger } from '../utils/logger';
 import fs from 'fs';
@@ -799,9 +800,13 @@ export class ProjectService {
       await this.lineClient.sendPush(userId, 'ファイルパスを指定してください。\n例:「README.mdを見せて」');
       return;
     }
-    const fullPath = path.join(repoPath, filePath);
-    if (!fullPath.startsWith(repoPath)) {
-      await this.lineClient.sendPush(userId, '⚠️ 無効なパスです。');
+    // path.resolve + path.relative でリポジトリ外への脱出（絶対パス・.. ・兄弟ディレクトリ）を確実に防ぐ。
+    // 単純な startsWith 前方一致は C:\repo と C:\repo-secret を区別できず脆弱。
+    let fullPath: string;
+    try {
+      fullPath = safeWorkspacePath(repoPath, filePath);
+    } catch {
+      await this.lineClient.sendPush(userId, '⚠️ 無効なパスです。リポジトリ内のファイルのみ参照できます。');
       return;
     }
     if (!fs.existsSync(fullPath)) {
@@ -990,10 +995,11 @@ export class ProjectService {
       '変更内容を実装する準備をしてください。',
     ].join('\n');
 
-    // 既存のプランフローを流用（LINE に送信 → 確認待ち → 実行）
+    // 改善対象はアプリ自身のソース。LINE 入力からの自動実行（Write/Edit）は禁止し、
+    // 分析プランの提示のみに留める（適用は PC 側の担当者が手動で行う）。
     this.unknownCountByUser.delete(userId); // 改善プラン作成でリセット
-    await this.claudeCodeService.runPlan(selfRepoPath, prompt, userId);
-    logger.info('Feedback improvement plan triggered', { userId, description });
+    await this.claudeCodeService.runPlan(selfRepoPath, prompt, userId, { allowExec: false });
+    logger.info('Feedback improvement plan triggered (read-only)', { userId, description });
   }
 
   private async handleScreenshot(userId: string): Promise<void> {
@@ -1048,17 +1054,35 @@ export class ProjectService {
   }
 
   private async handleReposPathSet(paths: string, userId: string): Promise<void> {
-    process.env['GIT_REPOS_PATHS'] = paths;
+    // ユーザー入力を検証: 絶対パスの実在ディレクトリのみ許可。
+    // 未検証だと C:\Users などを指定してマシン上の任意リポジトリを列挙・選択できてしまう。
+    const parts = paths.split(';').map((p) => p.trim()).filter(Boolean);
+    const invalid = parts.filter(
+      (p) => !path.isAbsolute(p) || p.includes('..') ||
+             !(fs.existsSync(p) && fs.statSync(p).isDirectory()),
+    );
+
+    if (parts.length === 0 || invalid.length > 0) {
+      await this.lineClient.sendPush(userId, [
+        '❌ 無効なパスです。実在する絶対パスのフォルダのみ指定できます。',
+        invalid.length > 0 ? `\n問題のあるパス:\n${invalid.join('\n')}` : '',
+        '\n例:「パス設定: D:\\Project」（複数はセミコロン区切り）',
+      ].filter(Boolean).join('\n'));
+      return;
+    }
+
+    const normalized = parts.join(';');
+    process.env['GIT_REPOS_PATHS'] = normalized;
     this.gitCommandService.invalidateCache();
     const envFilePath = process.env['ENV_FILE_PATH'] ?? '不明';
     await this.lineClient.sendPush(userId, [
       '✅ リポジトリ検索パスを設定しました（今回起動中のみ有効）。',
       '',
-      `設定値: ${paths}`,
+      `設定値: ${normalized}`,
       '',
       '永続化するには設定ファイルに追記してください:',
       `📄 ${envFilePath}`,
-      `GIT_REPOS_PATHS=${paths}`,
+      `GIT_REPOS_PATHS=${normalized}`,
     ].join('\n'));
   }
 

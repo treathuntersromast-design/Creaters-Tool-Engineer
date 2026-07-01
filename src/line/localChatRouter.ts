@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import express from 'express';
 import { parseLineMessage } from './messageParser';
 import { filterMessage } from '../security/commandFilter';
+import { internalTokenGuard } from './internalAuth';
 import { ProjectService } from '../core/projectService';
 import { LineClient } from './lineClient';
 import { logger } from '../utils/logger';
@@ -11,8 +12,12 @@ const MAX_TEXT_LENGTH = 2000;
 export function createLocalChatRouter(
   projectService: ProjectService,
   lineClient: LineClient,
+  internalToken: string,
 ): Router {
   const router = Router();
+  // PC アプリ（localhost）専用エンドポイント。ngrok 転送でも到達可能なため、
+  // LINE 署名・セッション認証を経由しない /chat はトークンで保護する。
+  router.use(internalTokenGuard(internalToken));
   router.use(express.json());
 
   router.post('/', async (req: Request, res: Response) => {

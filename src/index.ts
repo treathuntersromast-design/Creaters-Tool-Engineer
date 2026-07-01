@@ -27,11 +27,14 @@ import { EditorService } from './editor/editorService';
 import { ClaudeCodeService } from './claude/claudeCodeService';
 import { checkWindowsUpdateStatus, isUpdateImminent, pauseWindowsUpdate, formatWuStatus } from './system/windowsUpdateService';
 import { AddressInfo, Server } from 'net';
+import crypto from 'crypto';
 import { createServer } from './server';
 import { logger } from './utils/logger';
 
 export interface ServerHandle {
   port: number;
+  /** /admin・/chat 内部 API 用の共有トークン（Electron メインプロセスへ渡す） */
+  internalToken: string;
   close: () => Promise<void>;
 }
 
@@ -89,7 +92,8 @@ export async function startServer(): Promise<ServerHandle> {
     claudeCodeService, lessonsRepo,
   );
 
-  const app = createServer(projectService, sessionService, messageRepo, lineClient);
+  const internalToken = crypto.randomBytes(32).toString('hex');
+  const app = createServer(projectService, sessionService, messageRepo, lineClient, internalToken);
 
   // 起動時 Windows Update チェック（失敗してもサーバー起動は続行）
   checkWindowsUpdateStatus().then(async (status) => {
@@ -122,6 +126,7 @@ export async function startServer(): Promise<ServerHandle> {
       logger.info('Admin API', { url: `http://localhost:${port}/admin` });
       resolve({
         port,
+        internalToken,
         close: () => new Promise<void>((res) => {
           server.close(() => { closeDatabase(); res(); });
         }),

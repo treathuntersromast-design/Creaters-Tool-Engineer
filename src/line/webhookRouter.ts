@@ -123,13 +123,8 @@ async function processEvent(event: LineEvent, deps: WebhookRouterDeps): Promise<
     return;
   }
 
-  // Claude plan confirmation — intercept before normal parsing
-  if (deps.isClaudePlanPending(userId)) {
-    await deps.handleCommand({ type: 'CLAUDE_CONFIRM', content: text, userId });
-    return;
-  }
-
-  // Security filter — block dangerous instructions before any processing
+  // Security filter — block dangerous instructions before ANY processing,
+  // including Claude plan confirmation/rewrite (which reaches Claude Code exec mode).
   const secCheck = filterMessage(text);
   if (secCheck.blocked) {
     logger.warn('Blocked dangerous message', { userId, reason: secCheck.reason });
@@ -141,6 +136,12 @@ async function processEvent(event: LineEvent, deps: WebhookRouterDeps): Promise<
         `このアプリは機密情報の取得・外部公開・破壊的操作には対応していません。`,
       );
     }
+    return;
+  }
+
+  // Claude plan confirmation — intercept before normal parsing (after the security filter)
+  if (deps.isClaudePlanPending(userId)) {
+    await deps.handleCommand({ type: 'CLAUDE_CONFIRM', content: text, userId });
     return;
   }
 

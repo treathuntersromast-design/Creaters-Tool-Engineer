@@ -3,6 +3,7 @@ import { SessionService } from '../core/sessionService';
 import { MessageRepository } from '../db/repositories/messageRepository';
 import { LineClient } from './lineClient';
 import { discoverRepositories } from '../git/repositoryDiscovery';
+import { internalTokenGuard } from './internalAuth';
 import { logger } from '../utils/logger';
 
 /** userId → displayName のインメモリキャッシュ（プロセス再起動でリセット） */
@@ -35,9 +36,12 @@ export function createAdminRouter(
   sessionService: SessionService,
   messageRepo: MessageRepository,
   lineClient: LineClient,
+  internalToken: string,
 ): Router {
   const router = Router();
+  // 多層防御: IP 判定（LAN からの直接アクセスを弾く）＋ トークン（ngrok 転送を弾く）
   router.use(localhostOnly);
+  router.use(internalTokenGuard(internalToken));
 
   router.get('/health', (_req: Request, res: Response) => {
     res.json({ status: 'ok' });

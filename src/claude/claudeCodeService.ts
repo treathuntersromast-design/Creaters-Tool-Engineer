@@ -53,7 +53,13 @@ export class ClaudeCodeService {
 
   // ── Plan mode: read-only, asks confirmation before execution ──────────────
 
-  async runPlan(repoPath: string, prompt: string, userId: string): Promise<void> {
+  async runPlan(
+    repoPath: string,
+    prompt: string,
+    userId: string,
+    options?: { allowExec?: boolean },
+  ): Promise<void> {
+    const allowExec = options?.allowExec ?? true;
     await this.lineClient.sendPush(userId, '🤖 Claude Code でプランを生成中...\n（最大2分かかる場合があります）');
 
     const text = await this.callClaude(repoPath, prompt, PLAN_TOOLS, userId);
@@ -67,6 +73,19 @@ export class ClaudeCodeService {
       for (let i = 0; i < chunks.length; i++) {
         await this.lineClient.sendPush(userId, `📋 Claude Code プラン (${i + 1}/${chunks.length})\n\n${chunks[i]}`);
       }
+    }
+
+    // allowExec=false のプランは LINE 経由での自動実行を許可しない。
+    // 特にアプリ自身のソースを対象とする改善プラン（feedback）で、
+    // LINE 入力からセキュリティ制御コードを書き換えられるのを防ぐため。
+    if (!allowExec) {
+      await this.lineClient.sendPush(userId,
+        '─────────────────\n' +
+        '⚠️ この改善プランはアプリ自身のコードに関わるため、LINE からは自動実行されません。\n' +
+        '内容を確認のうえ、PC 側で担当者が適用してください。',
+      );
+      logger.info('Claude Code read-only plan generated (exec disabled)', { userId, repoPath });
+      return;
     }
 
     // Store pending for confirmation

@@ -1,5 +1,6 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
 
@@ -40,7 +41,10 @@ export async function takeScreenshot(screenshotsDir: string): Promise<Screenshot
     String(now.getSeconds()).padStart(2, '0'),
   ].join('');
 
-  const filename = `screenshot_${ts}.png`;
+  // 公開URL（/screenshots/<filename>）は認証不可のため、推測・総当たりを防ぐ
+  // ランダムトークンをファイル名に含める。
+  const rand = crypto.randomBytes(16).toString('hex');
+  const filename = `screenshot_${ts}_${rand}.png`;
   const filePath = path.join(screenshotsDir, filename);
   // バックスラッシュをエスケープ
   const escaped = filePath.replace(/\\/g, '\\\\');
