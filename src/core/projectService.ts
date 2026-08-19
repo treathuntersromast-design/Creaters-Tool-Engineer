@@ -579,6 +579,7 @@ export class ProjectService {
       '',
       '【Claude Code】',
       '・プランモード: <指示>（Claude Codeをプランモードで実行して結果をここへ送信）',
+      '・コードの分析・修正は自然文でOK（例:「◯◯を修正して」→プラン提示→「はい」で実行）',
       '',
       '【エディター】',
       '・VSCodeを開いて / Cursorを開いて',
@@ -630,18 +631,18 @@ export class ProjectService {
       'EDITOR_STATUS - エディター状態確認',
       'CONFIG_SHOW - 設定確認',
       'REPOS_PATH_SET - リポジトリ検索パスを設定（"paths"にパス文字列）',
-      'REPO_ANALYZE - リポジトリの内容を分析して質問に回答（"query"に質問内容）。「〜を確認して」「〜は揃ってますか」「〜を調べて」など分析・確認依頼に使用',
+      'REPO_ANALYZE - Claude Code CLI がリポジトリのファイルを直接読んで質問に回答（"query"に質問内容）。「〜を確認して」「〜は揃ってますか」「〜を調べて」など読み取りのみの分析・確認依頼に使用。コード変更を伴う依頼は REPO_ANALYZE ではなく CLAUDE_PLAN を選ぶこと',
       'FILE_LIST - リポジトリ内のファイル一覧を表示',
       'FILE_READ - 特定ファイルの内容を表示（"filePath"にリポジトリルートからの相対パス）',
       'GIT_COMMIT - 変更をすべてステージ→コミット（"message"にコミット概要、省略可）。「コミットして」「コミット: バグ修正」などに使用',
       'GIT_MERGE - 指定ブランチをマージ（"branch"にブランチ名）。「mainをマージして」「マージ: develop」などに使用',
       'GIT_INIT - 新規リポジトリを作成（"name"にリポジトリ名）。「リポジトリを作成して」「新しいリポジトリ〜」などに使用',
       'TEAM_PROPOSE - AIがプロジェクトに最適なチーム構成を提案する（"description"にプロジェクト説明）。「チームを提案して」「チーム構成を考えて」などに使用',
-      'CLAUDE_PLAN - Claude Code をプランモードで実行し結果をLINEへ転送（"prompt"に指示内容）。「プランを作って」「設計プランを生成して」「ClaudeCodeで〜を計画して」などに使用',
+      'CLAUDE_PLAN - Claude Code によるコードの修正・実装・機能追加・バグ修正・リファクタリング（"prompt"に指示内容をそのまま）。「〜を修正して」「〜を直して」「〜を実装して」「〜を追加して」「〜に変えて」などコード変更の依頼に使用。まず修正プランを提示し、ユーザーの「はい」確認後に実行される',
       'FEEDBACK - アプリの想定外の動作をフィードバックして自動改善プランを生成（"description"に問題の説明）。「改善:」「フィードバック:」「この返答は間違い」「この会話は想定外」などに使用',
       'SCREENSHOT - デスクトップのスクリーンショットを撮影してLINEへ送信。「スクリーンショット」「キャプチャ」「画面を撮って」などに使用',
       '',
-      '【ボットの能力】Gitコマンド実行、リポジトリ選択、エディター起動、リポジトリファイルの読み取り・分析（REPO_ANALYZE）。ユーザーの「〜を確認して」「〜を調べて」「〜は揃ってますか」などの依頼はREPO_ANALYZEで対応できる。',
+      '【ボットの能力】Gitコマンド実行、リポジトリ選択、Claude Code CLI によるリポジトリの直接分析（REPO_ANALYZE: ファイルを実際に読んで回答）とコード修正（CLAUDE_PLAN: プラン提示→確認→実行）。分析・修正はこのボット自身が完結して実行できるため、VSCode/Cursor 等のエディターを開くよう誘導してはならない。エディター起動は明示的に要求された場合のみ EDITOR_OPEN を使う。',
       '',
       '【返答形式】JSONのみ（余分なテキスト不要）。例:',
       '{"type":"GIT_LIST_REPOS"}',
@@ -655,6 +656,7 @@ export class ProjectService {
       '{"type":"GIT_INIT","name":"my-new-repo"}',
       '{"type":"TEAM_PROPOSE","description":"クリエイターがAIを活用するマーケティングツール"}',
       '{"type":"CLAUDE_PLAN","prompt":"このリポジトリのアプリ設計プランを作成してください"}',
+      '{"type":"CLAUDE_PLAN","prompt":"ログイン画面のバリデーションを修正して"}',
       '{"type":"FEEDBACK","description":"リポジトリ一覧を表示しようとしたがうまくいかなかった"}',
       '{"type":"SCREENSHOT"}',
       isHearing ? '{"type":"HEARING_REPLY"}' : '',
@@ -828,6 +830,17 @@ export class ProjectService {
       return;
     }
 
+    // Claude Code CLI があればファイルを直接読ませて回答する（進捗表示は runAnalyze 側が行う）。
+    if (this.claudeCodeService) {
+      const reply = await this.claudeCodeService.runAnalyze(repoPath, query, userId);
+      if (reply !== null) {
+        // 会話履歴の肥大を防ぐため先頭1000文字のみ保持する。
+        this.addHistory(userId, 'assistant', reply.slice(0, 1000));
+      }
+      return;
+    }
+
+    // ── フォールバック: Claude Code CLI が無い場合のみ git 情報 + aiClient で分析 ──
     await this.lineClient.sendPush(userId, '🔍 リポジトリを分析中です...');
 
     const sections: string[] = [`【リポジトリ】${state.selectedRepo}`];
@@ -965,12 +978,19 @@ export class ProjectService {
       ? history.map((h) => `${h.role === 'user' ? 'ユーザー' : 'ボット'}: ${h.content}`).join('\n')
       : '（履歴なし）';
 
-    // このアプリ自身のリポジトリパスで Claude Code を実行
-    const selfRepoPath = process.cwd();
-
     if (!this.claudeCodeService) {
       await this.lineClient.sendPush(userId,
         '⚠️ Claude Code サービスが初期化されていません。\nサーバーを再起動してください。',
+      );
+      return;
+    }
+
+    // このアプリ自身のソースリポジトリパスで Claude Code を実行する。
+    // EXE 実行時など process.cwd() がソースと異なる場合は SELF_REPO_PATH で明示指定する。
+    const selfRepoPath = process.env['SELF_REPO_PATH'] ?? process.cwd();
+    if (!fs.existsSync(path.join(selfRepoPath, 'package.json'))) {
+      await this.lineClient.sendPush(userId,
+        '⚠️ アプリのソースリポジトリを特定できませんでした。環境変数 SELF_REPO_PATH にソースのパスを設定してください。',
       );
       return;
     }
@@ -991,15 +1011,16 @@ export class ProjectService {
       '3. handleWithAIClassification の AI 分類プロンプトを改善すべきか',
       '4. src/line/localChatRouter.ts や他のファイルに変更が必要か',
       '',
-      '具体的にどのファイルのどの部分をどう変更すればよいかを提示し、',
-      '変更内容を実装する準備をしてください。',
+      '具体的にどのファイルのどの部分をどう変更すればよいかを提示してください。',
+      'ユーザーが「はい」で承認すると、そのままこのリポジトリに変更が適用されます。',
     ].join('\n');
 
-    // 改善対象はアプリ自身のソース。LINE 入力からの自動実行（Write/Edit）は禁止し、
-    // 分析プランの提示のみに留める（適用は PC 側の担当者が手動で行う）。
+    // 改善対象はアプリ自身のソース。プラン提示 → ユーザー確認 → 実行のフローで自アプリも修正できる。
+    // LINE 経由実行に対する防御線（セッション認証+OTP / commandFilter / Bash 不許可 / 確認フロー）は
+    // claudeCodeService.runPlan 側のコメントを参照。
     this.unknownCountByUser.delete(userId); // 改善プラン作成でリセット
-    await this.claudeCodeService.runPlan(selfRepoPath, prompt, userId, { allowExec: false });
-    logger.info('Feedback improvement plan triggered (read-only)', { userId, description });
+    await this.claudeCodeService.runPlan(selfRepoPath, prompt, userId);
+    logger.info('Feedback improvement plan triggered', { userId, description });
   }
 
   private async handleScreenshot(userId: string): Promise<void> {

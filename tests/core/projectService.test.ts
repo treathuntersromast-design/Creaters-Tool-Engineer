@@ -7,9 +7,20 @@ import { AgentFactory } from '../../src/agents/AgentFactory';
 import { WorkspaceService } from '../../src/core/workspaceService';
 import { createTestDb, makeHearingAnswers } from '../helpers/testDb';
 
+function makeClaudeCodeServiceMock() {
+  return {
+    runAnalyze: jest.fn().mockResolvedValue('分析結果テキスト'),
+    runPlan: jest.fn().mockResolvedValue(undefined),
+    handleConfirmOrRewrite: jest.fn().mockResolvedValue(undefined),
+    hasPendingPlan: jest.fn().mockReturnValue(false),
+    cancelPendingPlan: jest.fn().mockReturnValue(false),
+  };
+}
+
 function buildServiceWithAI(aiResponse: string) {
   const base = buildService();
   const aiClient = { generate: jest.fn().mockResolvedValue(aiResponse) };
+  const claudeCodeService = makeClaudeCodeServiceMock();
   const service = new ProjectService(
     base.repos.projectRepo,
     base.repos.messageRepo,
@@ -26,8 +37,9 @@ function buildServiceWithAI(aiResponse: string) {
     base.gitCommandService as any,
     base.editorService as any,
     aiClient as any,
+    claudeCodeService as any,
   );
-  return { ...base, service, aiClient };
+  return { ...base, service, aiClient, claudeCodeService };
 }
 
 function buildService() {
@@ -1044,6 +1056,73 @@ describe('ProjectService', () => {
       const names = agents.map((a: { name: string }) => a.name);
       expect(names).toContain('田中 Coordinator');
       expect(names).toContain('佐藤 Developer');
+    });
+  });
+
+  // ─────────────────────────────────────────────────
+  // Claude Code CLI routing (REPO_ANALYZE / CLAUDE_PLAN / FEEDBACK)
+  // ─────────────────────────────────────────────────
+  describe('Claude Code CLI routing', () => {
+    it('routes REPO_ANALYZE to claudeCodeService.runAnalyze', async () => {
+      const { service, gitCommandService, claudeCodeService, tempRoot } =
+        buildServiceWithAI('{"type":"REPO_ANALYZE","query":"リリース準備状況を確認して"}');
+      tempRoots.push(tempRoot);
+      // getRepoPath() は selectedRepo の末尾 (path) を抽出する
+      gitCommandService.getSessionState.mockReturnValue({
+        selectedRepo: 'MyRepo (C:\\repos\\MyRepo)',
+        pendingAction: null,
+      });
+
+      await service.handleCommand({ type: 'UNKNOWN', raw: 'リリース準備を確認して', userId: 'Ucc1' });
+
+      expect(claudeCodeService.runAnalyze).toHaveBeenCalledWith(
+        'C:\\repos\\MyRepo',
+        'リリース準備状況を確認して',
+        'Ucc1',
+      );
+    });
+
+    it('routes CLAUDE_PLAN to claudeCodeService.runPlan with (repoPath, prompt, userId)', async () => {
+      const { service, gitCommandService, claudeCodeService, tempRoot } =
+        buildServiceWithAI('{"type":"CLAUDE_PLAN","prompt":"ログイン画面のバリデーションを修正して"}');
+      tempRoots.push(tempRoot);
+      gitCommandService.getSessionState.mockReturnValue({
+        selectedRepo: 'MyRepo (C:\\repos\\MyRepo)',
+        pendingAction: null,
+      });
+
+      await service.handleCommand({ type: 'UNKNOWN', raw: 'ログイン画面を直して', userId: 'Ucc2' });
+
+      expect(claudeCodeService.runPlan).toHaveBeenCalledWith(
+        'C:\\repos\\MyRepo',
+        'ログイン画面のバリデーションを修正して',
+        'Ucc2',
+      );
+    });
+
+    it('routes FEEDBACK to claudeCodeService.runPlan without a 4th argument', async () => {
+      const { service, claudeCodeService, tempRoot } =
+        buildServiceWithAI('{"type":"FEEDBACK","description":"想定外の返答が返ってきた"}');
+      tempRoots.push(tempRoot);
+      // handleFeedback は selfRepoPath に package.json が実在することを要求する。
+      // プロジェクトルート（cwd）には package.json があるため SELF_REPO_PATH に設定する。
+      const prev = process.env['SELF_REPO_PATH'];
+      process.env['SELF_REPO_PATH'] = process.cwd();
+      try {
+        await service.handleCommand({ type: 'UNKNOWN', raw: 'この返答は想定外', userId: 'Ucc3' });
+      } finally {
+        if (prev === undefined) delete process.env['SELF_REPO_PATH'];
+        else process.env['SELF_REPO_PATH'] = prev;
+      }
+
+      expect(claudeCodeService.runPlan).toHaveBeenCalledTimes(1);
+      expect(claudeCodeService.runPlan).toHaveBeenCalledWith(
+        process.cwd(),
+        expect.any(String),
+        'Ucc3',
+      );
+      // 第4引数（旧 { allowExec } オプション）は渡さない
+      expect(claudeCodeService.runPlan.mock.calls[0].length).toBe(3);
     });
   });
 

@@ -67,3 +67,102 @@ describe('ClaudeCodeService.runPlan', () => {
     jest.unmock('child_process');
   });
 });
+
+describe('ClaudeCodeService.runAnalyze', () => {
+  it('sends 分析結果 chunk and returns body without leaving a pending plan (success)', async () => {
+    const pushMessages: Array<{ userId: string; text: string }> = [];
+    const lineClient = {
+      sendPush: jest.fn(async (userId: string, text: string) => {
+        pushMessages.push({ userId, text });
+      }),
+    };
+
+    jest.resetModules();
+    jest.doMock('child_process', () => {
+      const actual = jest.requireActual<typeof import('child_process')>('child_process');
+      return {
+        ...actual,
+        execFile: (_cmd: string, _args: string[], _opts: unknown, cb: (err: unknown, res: { stdout: string; stderr: string }) => void) => {
+          cb(null, { stdout: 'リリース準備は整っています。README.md を参照。', stderr: '' });
+        },
+      };
+    });
+
+    const { ClaudeCodeService: CS } = await import('../../src/claude/claudeCodeService');
+    const service = new CS(lineClient as any);
+
+    const result = await service.runAnalyze('/some/repo', 'リリース準備状況を確認して', 'U002');
+
+    const texts = pushMessages.map((m) => m.text);
+    expect(texts.some((t) => t.includes('🔍 分析結果'))).toBe(true);
+    expect(result).toBe('リリース準備は整っています。README.md を参照。');
+    expect(service.hasPendingPlan('U002')).toBe(false);
+
+    jest.resetModules();
+    jest.unmock('child_process');
+  });
+
+  it('sends install guidance and returns null on ENOENT', async () => {
+    const pushMessages: Array<{ userId: string; text: string }> = [];
+    const lineClient = {
+      sendPush: jest.fn(async (userId: string, text: string) => {
+        pushMessages.push({ userId, text });
+      }),
+    };
+
+    jest.resetModules();
+    jest.doMock('child_process', () => {
+      const actual = jest.requireActual<typeof import('child_process')>('child_process');
+      return {
+        ...actual,
+        execFile: (_cmd: string, _args: string[], _opts: unknown, cb: (err: unknown) => void) => {
+          cb(Object.assign(new Error('not found'), { code: 'ENOENT' }));
+        },
+      };
+    });
+
+    const { ClaudeCodeService: CS } = await import('../../src/claude/claudeCodeService');
+    const service = new CS(lineClient as any);
+
+    const result = await service.runAnalyze('/some/repo', '確認して', 'U003');
+
+    const texts = pushMessages.map((m) => m.text);
+    expect(texts.some((t) => t.includes('インストール'))).toBe(true);
+    expect(result).toBeNull();
+
+    jest.resetModules();
+    jest.unmock('child_process');
+  });
+
+  it('sends timeout message when the CLI is killed (SIGTERM)', async () => {
+    const pushMessages: Array<{ userId: string; text: string }> = [];
+    const lineClient = {
+      sendPush: jest.fn(async (userId: string, text: string) => {
+        pushMessages.push({ userId, text });
+      }),
+    };
+
+    jest.resetModules();
+    jest.doMock('child_process', () => {
+      const actual = jest.requireActual<typeof import('child_process')>('child_process');
+      return {
+        ...actual,
+        execFile: (_cmd: string, _args: string[], _opts: unknown, cb: (err: unknown) => void) => {
+          cb(Object.assign(new Error('timeout'), { killed: true, signal: 'SIGTERM' }));
+        },
+      };
+    });
+
+    const { ClaudeCodeService: CS } = await import('../../src/claude/claudeCodeService');
+    const service = new CS(lineClient as any);
+
+    const result = await service.runAnalyze('/some/repo', '重い分析', 'U004');
+
+    const texts = pushMessages.map((m) => m.text);
+    expect(texts.some((t) => t.includes('⏱️'))).toBe(true);
+    expect(result).toBeNull();
+
+    jest.resetModules();
+    jest.unmock('child_process');
+  });
+});
